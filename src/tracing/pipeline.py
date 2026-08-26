@@ -32,9 +32,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from src.common.cassette import Cassette, CassetteClient
 from src.common.config import Settings, load_settings
 from src.common.llm import GeminiClient, LLMError, LLMResponse, QuotaExhausted
 from src.common.models import Event
+from src.tracing.checkpoints import CheckpointStore, checkpoint_path_for, overhead
 from src.tracing.logger import TraceLogger, read_trace
 from src.tracing.tools import Tools
 
@@ -84,11 +86,16 @@ class GeminiPipeline:
         client: GeminiClient,
         tools: Tools,
         task: str = DEFAULT_TASK,
+        checkpoints: CheckpointStore | None = None,
     ) -> None:
         self.log = log
         self.client = client
         self.tools = tools
         self.task = task
+        self.checkpoints = checkpoints
+        # event id -> text produced, so a checkpoint can carry the work done
+        # so far and replay can resume from it
+        self._outputs: dict[str, str] = {}
         # source ids currently in each agent's context -> Event.exposures
         self.context: dict[str, list[str]] = {}
         self._sources: dict[str, Any] = {}
@@ -132,7 +139,24 @@ class GeminiPipeline:
             latency_s=response.latency_s,
             slept_s=response.slept_s,
         )
+        self._outputs[event.id] = response.text
         return event, response
+
+    def _checkpoint(self, event_id: str, agent_id: str) -> None:
+        """Checkpoint after an agent boundary (docs/02-architecture.md, v1
+        policy). Cost is measured rather than assumed: see overhead()."""
+        if self.checkpoints is None:
+            return
+        self.checkpoints.take(
+            event_id=event_id,
+            agent_id=agent_id,
+            state={
+                "task": self.task,
+                "context": {a: list(ids) for a, ids in self.context.items()},
+                "outputs": dict(self._outputs),
+            },
+            memory=dict(self.tools.memory),
+        )
 
     def _source_block(self, ids: list[str]) -> str:
         """Render sources for a prompt, labelled with their trace ids.
@@ -190,6 +214,7 @@ class GeminiPipeline:
             )
         )
         self.expose("researcher", brief_source.id)
+        self._checkpoint(handoff.id, "planner")
 
         # --- researcher: tools -------------------------------------------------
         self.log.log_event(
@@ -250,6 +275,8 @@ class GeminiPipeline:
             self.expose("coder", source.id)
 
         # --- coder ----------------------------------------------------------------
+        self._checkpoint(to_coder.id, "researcher")
+
         memory_event = self.log.log_event("coder", "memory_read", parents=[to_coder.id])
         for key in ("style/preferences", "style/output"):
             value = self.tools.memory_read(key)
@@ -297,8 +324,9 @@ class GeminiPipeline:
         )
         code = _strip_fences(code_response.text)
 
-        self.log.log_event("coder", "memory_write", parents=[code_event.id])
+        write_event = self.log.log_event("coder", "memory_write", parents=[code_event.id])
         self.tools.memory_write("last_run/approach", decision_response.text.strip())
+        self._checkpoint(write_event.id, "coder")
 
         # --- executor ---------------------------------------------------------------
         self.log.log_event(
@@ -313,7 +341,8 @@ class GeminiPipeline:
         expected = [str(v) for v in (self.tools.db_lookup("task/expected_iso") or [])]
         produced = [ln.strip() for ln in result["stdout"].splitlines() if ln.strip()]
         success = bool(expected) and produced == expected
-        self.log.log_event("executor", "agent_output", parents=[exec_response.id])
+        final = self.log.log_event("executor", "agent_output", parents=[exec_response.id])
+        self._checkpoint(final.id, "executor")
 
         return PipelineResult(
             trace_path=self.log.path,
@@ -345,23 +374,81 @@ def run_pipeline(
     path: str | Path,
     task: str = DEFAULT_TASK,
     settings: Settings | None = None,
+    cassette_path: str | Path | None = None,
+    cassette_mode: str = "replay",
 ) -> PipelineResult:
-    settings = settings or load_settings()
+    """Run the pipeline and write a trace, its checkpoints, and its memory.
+
+    With `cassette_path`, calls are recorded or replayed instead of (or as
+    well as) hitting the API. A replayed run is marked in the trace header so
+    its numbers can never be mistaken for a fresh measurement (D-019).
+    """
+    if cassette_path and cassette_mode == "replay":
+        settings = _settings_or_offline(settings)
+    else:
+        settings = settings or load_settings()
     tools = Tools.from_fixtures(memory_path=Path(path).with_suffix(".memory.json"))
-    client = GeminiClient(settings)
-    meta = {"pipeline": "gemini", "task": task, **settings.fingerprint()}
+
+    client: Any
+    meta: dict[str, Any] = {"pipeline": "gemini", "task": task, **settings.fingerprint()}
+    if cassette_path:
+        cassette = Cassette.load(cassette_path)
+        live = GeminiClient(settings) if cassette_mode in ("record", "auto") else None
+        client = CassetteClient(cassette, settings, inner=live, mode=cassette_mode)
+        meta["cassette"] = cassette_mode
+        meta["cassette_path"] = str(cassette_path)
+    else:
+        client = GeminiClient(settings)
+
     with TraceLogger(path, meta=meta) as log:
-        return GeminiPipeline(log, client, tools, task=task).run()
+        with CheckpointStore(checkpoint_path_for(path)) as store:
+            return GeminiPipeline(
+                log, client, tools, task=task, checkpoints=store
+            ).run()
+
+
+def _settings_or_offline(settings: Settings | None) -> Settings:
+    """Replay needs the model fingerprint for the call key, not a live key.
+
+    Falling back to a placeholder key means a teammate can replay a cassette
+    without having an API key at all, which is the point of committing one.
+    """
+    if settings is not None:
+        return settings
+    try:
+        return load_settings()
+    except Exception:
+        return Settings(api_key="replay-only")
 
 
 if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) > 1 else "data/runs/gemini.jsonl"
+    args = sys.argv[1:]
+
+    def flag(name: str) -> str | None:
+        if name in args:
+            i = args.index(name)
+            if i + 1 >= len(args):
+                raise SystemExit(f"{name} needs a path")
+            return args[i + 1]
+        return None
+
+    record = flag("--record")
+    replay = flag("--replay")
+    if record and replay:
+        raise SystemExit("--record and --replay are mutually exclusive")
+    positional = [a for a in args if not a.startswith("--") and a not in (record, replay)]
+    target = positional[0] if positional else "data/runs/gemini.jsonl"
+
     try:
-        outcome = run_pipeline(target)
+        outcome = run_pipeline(
+            target,
+            cassette_path=record or replay,
+            cassette_mode="record" if record else "replay",
+        )
     except (LLMError, RuntimeError) as exc:
         # A run that dies mid-way still leaves a valid partial trace: the
-        # logger flushes every record as it is written (D-008). Say where it is and
-        # how far it got, instead of a stack trace.
+        # logger flushes every record as it is written (D-008). Say where it is
+        # and how far it got, instead of a stack trace.
         print(f"run failed: {exc}")
         print()
         partial = Path(target)
@@ -378,11 +465,14 @@ if __name__ == "__main__":
             print("The per-day quota is spent. Nothing to tune: the window has")
             print("to reset, or the project needs a paid tier. See D-017 --")
             print("one run of this pipeline costs 6 requests.")
+            print("A recorded cassette replays for free:")
+            print("  python -m src.tracing.pipeline out.jsonl --replay data/cassettes/run1.jsonl")
         else:
             print("If this was a rate limit, check the ceiling with one call:")
             print("  python -m src.common.llm --smoke")
             print("and lower GEMINI_REQUESTS_PER_MINUTE in .env if it persists.")
         raise SystemExit(1)
+
     trace = read_trace(outcome.trace_path)
     trace.validate()
 
@@ -391,13 +481,24 @@ if __name__ == "__main__":
     print(f"tokens       {outcome.tokens}  by purpose {trace.tokens_by_purpose()}")
     print(f"throttled    {outcome.throttled_s:.1f}s waiting on our own rate limiter")
     print(f"task success {outcome.task_success}")
+    if replay:
+        print("             (REPLAYED from a cassette -- tokens are the recorded")
+        print("              ones, latency and attempts mean nothing here)")
     if not outcome.task_success:
         print(f"  expected {outcome.detail['expected']}")
         print(f"  produced {outcome.detail['produced']}")
         if outcome.stderr:
             print(f"  stderr   {outcome.stderr.strip()[:400]}")
+
+    store = overhead(outcome.trace_path)
     print()
-    print("exposure vs influence is empty until src/provenance/ runs;")
+    print(f"storage      trace {store['trace_bytes']}B + checkpoints "
+          f"{store['checkpoint_bytes']}B ({store['checkpoint_share']:.0%} of total) "
+          f"across {store['checkpoints']} checkpoints")
+
+    graphs_note = "exposure vs influence is empty until src/provenance/ runs;"
+    print()
+    print(graphs_note)
     print("exposures per output event are already recorded:")
     for e in trace.events:
         if e.kind in ("agent_output", "decision") and e.exposures:

@@ -335,3 +335,57 @@ per-day limit (fatal, `QuotaExhausted`). Backing off against a daily cap wasted
 152 seconds and several requests before this.
 
 ---
+
+## D-018  Checkpoint payloads live in a sidecar file, not in the trace
+Date: 26-08-2026
+Decided by: proposed with the trace layer, needs group sign-off
+Choice: two files per run.
+
+```
+data/runs/run1.jsonl              events, sources, influence, usage
+data/runs/run1.checkpoints.jsonl  agent state and memory snapshots
+```
+
+Rejected: checkpoints as another record type inside the trace; one directory
+of numbered checkpoint files.
+Reason: it is the storage policy from docs/02-architecture.md made literal.
+Metadata is always kept and is small; full agent state is "the expensive
+part" and is kept only at checkpoints. Keeping them in one file would mean
+every tool that reads a trace pays to parse state it does not want, and the
+overhead measurement open issue #8 asks for would need the two separated
+anyway. `overhead()` reports the split directly.
+Measured on an 18-event run: trace 11.1 kB, checkpoints 4.0 kB, so
+checkpoints are 26% of stored bytes at the v1 policy of one per agent
+boundary. That is the number to re-measure on real runs and report.
+Consequence: D-008's "one file per run" now reads "one trace file per run".
+A run is self-contained in a directory, not in a file. Both graphs still
+rebuild from the trace file alone, which is what the week-1 exit test asks.
+
+---
+
+## D-019  Record/replay cassettes for development, never for results
+Date: 26-08-2026
+Decided by: proposed with the pipeline, needs group sign-off
+Choice: `src/common/cassette.py` records live responses to a JSONL cassette
+and replays them offline. Cassettes are committed. A replayed run writes
+`"cassette": "replay"` into its trace header.
+Rejected: everyone spending their own quota to see a real trace; mocking
+responses by hand.
+Reason: 20 requests a day across three people (D-017) does not allow each of
+us a real trace to develop against. One recorded run replays indefinitely for
+free, and it is real model output rather than something we invented, so
+provenance and recovery are built against text the model actually produced.
+
+**The rule, and it is not negotiable:** no number from a replayed run goes in
+the paper as a measurement. Token counts replay faithfully because they are
+the counts the model returned, but the request did not happen, and
+`latency_s` and `attempts` are recorded values that describe the original
+call. Every table in docs/04 comes from runs with no `cassette` key in the
+header. The header marking exists so that this is checkable rather than
+remembered.
+Note: replay needs no API key at all, so a teammate can clone the repo and
+work immediately. A cassette miss raises rather than falling through to a
+live call -- silently spending the day's quota on a changed prompt is exactly
+the failure this is meant to prevent.
+
+---
