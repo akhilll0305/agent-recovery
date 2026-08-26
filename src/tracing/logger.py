@@ -133,16 +133,23 @@ class TraceLogger:
         kind: SourceKind,
         content: str,
         origin_event: str | None = None,
+        derived_from: str | None = None,
         malicious: bool = False,
         metadata: dict[str, Any] | None = None,
     ) -> Source:
-        """Register an incoming unit of information and give it an id."""
+        """Register an incoming unit of information and give it an id.
+
+        Pass `derived_from` when the source is an earlier event's output being
+        handed to another agent. It is the same work as that event and is not
+        counted again (D-012).
+        """
         self._source_count += 1
         source = Source(
             id=source_id(self._source_count),
             kind=kind,
             content=content,
             origin_event=origin_event,
+            derived_from=derived_from,
             malicious=malicious,
             metadata=dict(metadata or {}),
         )
@@ -212,6 +219,26 @@ class Trace:
     def by_agent(self, agent_id: str) -> list[Event]:
         return [e for e in self.events if e.agent_id == agent_id]
 
+    def work_units(self) -> list[Event]:
+        """The events that count as work (D-012).
+
+        Work is counted in events. Sources are information, not work: a source
+        carrying `derived_from` is the same work as that event and must never
+        be added to it. Every metric in docs/04-experiments.md starts here, so
+        the unit is defined once and not re-decided per metric.
+        """
+        return list(self.events)
+
+    def derived_sources(self) -> dict[str, str]:
+        """{source id -> the event whose output it is}. These sources are the
+        events' work seen from the consumer's side, not extra work."""
+        return {s.id: s.derived_from for s in self.sources if s.derived_from}
+
+    def source_event(self, sid: str) -> str | None:
+        """The event a source is the output of, or None for sources that came
+        from outside the run (web, user input, memory written earlier)."""
+        return self.source(sid).derived_from
+
     def influences(self, eid: str) -> list[str]:
         """Source ids with an influence edge into this event."""
         return [e.source_id for e in self.influence if e.target_event == eid]
@@ -253,6 +280,23 @@ class Trace:
                 raise ValueError(
                     f"source {s.id} has unknown origin_event {s.origin_event}"
                 )
+            if s.derived_from and s.derived_from not in self._events_by_id:
+                raise ValueError(
+                    f"source {s.id} has unknown derived_from {s.derived_from}"
+                )
+        # One event's output must not be wrapped as two sources: that is the
+        # double count D-012 exists to prevent, and it would inflate every
+        # work-preserved figure.
+        wrapped: dict[str, str] = {}
+        for s in self.sources:
+            if not s.derived_from:
+                continue
+            if s.derived_from in wrapped:
+                raise ValueError(
+                    f"event {s.derived_from} is wrapped by two sources: "
+                    f"{wrapped[s.derived_from]} and {s.id}"
+                )
+            wrapped[s.derived_from] = s.id
         for edge in self.influence:
             if edge.target_event not in self._events_by_id:
                 raise ValueError(
