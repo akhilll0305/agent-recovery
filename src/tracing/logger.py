@@ -13,6 +13,7 @@ Trace file format: one JSON object per line, tagged by a "record" key.
     {"record": "source",    "id": "S1", ...}
     {"record": "event",     "id": "e0001", ...}
     {"record": "influence", "source_id": "S1", "target_event": "e0004", ...}
+    {"record": "usage",     "call_id": "c0001", "purpose": "pipeline", ...}
 
 Lines are written and flushed as they happen, so a run that crashes still
 leaves a readable trace up to the crash.
@@ -34,6 +35,8 @@ from src.common.models import (
     InfluenceEdge,
     Source,
     SourceKind,
+    UsagePurpose,
+    UsageRecord,
     event_id,
     source_id,
 )
@@ -42,6 +45,7 @@ RECORD_CLASSES: dict[str, type] = {
     "event": Event,
     "source": Source,
     "influence": InfluenceEdge,
+    "usage": UsageRecord,
 }
 
 
@@ -77,9 +81,11 @@ class TraceLogger:
 
         self._event_count = 0
         self._source_count = 0
+        self._call_count = 0
         self.events: list[Event] = []
         self.sources: list[Source] = []
         self.influence: list[InfluenceEdge] = []
+        self.usage: list[UsageRecord] = []
         # last event id per agent, for automatic parent links
         self._last_by_agent: dict[str, str] = {}
 
@@ -157,6 +163,47 @@ class TraceLogger:
         self._write({"record": "source", **source.to_dict()})
         return source
 
+    def log_usage(
+        self,
+        purpose: UsagePurpose,
+        model: str,
+        prompt_tokens: int,
+        output_tokens: int,
+        total_tokens: int,
+        event_id_: str | None = None,
+        agent_id: str | None = None,
+        thoughts_tokens: int = 0,
+        attempts: int = 1,
+        latency_s: float = 0.0,
+        slept_s: float = 0.0,
+    ) -> UsageRecord:
+        """Record the token cost of one API call.
+
+        Called for every call, including the ones that are not part of the
+        original run. docs/04 is explicit that hiding the cost of the
+        counterfactual checks is the easiest way to look good dishonestly,
+        so the trace records analysis calls next to pipeline calls and the
+        metric splits them by `purpose`.
+        """
+        self._call_count += 1
+        record = UsageRecord(
+            call_id=f"c{self._call_count:04d}",
+            purpose=purpose,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            event_id=event_id_,
+            agent_id=agent_id,
+            thoughts_tokens=thoughts_tokens,
+            attempts=attempts,
+            latency_s=latency_s,
+            slept_s=slept_s,
+        )
+        self.usage.append(record)
+        self._write({"record": "usage", **record.to_dict()})
+        return record
+
     def log_influence(self, edge: InfluenceEdge) -> InfluenceEdge:
         """Record an influence edge. Written by src/provenance/, which
         decides *whether* an edge exists; the logger only stores it."""
@@ -201,6 +248,7 @@ class Trace:
     events: list[Event] = field(default_factory=list)
     sources: list[Source] = field(default_factory=list)
     influence: list[InfluenceEdge] = field(default_factory=list)
+    usage: list[UsageRecord] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self._events_by_id = {e.id: e for e in self.events}
@@ -253,6 +301,26 @@ class Trace:
         influenced = set(self.influences(eid))
         return [s for s in self.event(eid).exposures if s not in influenced]
 
+    def tokens_by_purpose(self) -> dict[str, int]:
+        """Total tokens per UsagePurpose. The cost table in docs/04 is built
+        from this; analysis and replay must stay separable."""
+        totals: dict[str, int] = {}
+        for u in self.usage:
+            totals[u.purpose] = totals.get(u.purpose, 0) + u.total_tokens
+        return totals
+
+    def analysis_tokens(self) -> int:
+        """Tokens spent deciding what is contaminated, rather than redoing it.
+        Open issue #7 is this number against replay tokens."""
+        return sum(u.total_tokens for u in self.usage if u.is_analysis)
+
+    def replay_tokens(self) -> int:
+        return sum(u.total_tokens for u in self.usage if u.purpose == "replay")
+
+    def pipeline_tokens(self) -> int:
+        """Cost of the original run: the denominator B0 (full restart) pays."""
+        return sum(u.total_tokens for u in self.usage if u.purpose == "pipeline")
+
     def agents(self) -> list[str]:
         """Agent ids in first-seen order."""
         seen: list[str] = []
@@ -297,6 +365,11 @@ class Trace:
                     f"{wrapped[s.derived_from]} and {s.id}"
                 )
             wrapped[s.derived_from] = s.id
+        for u in self.usage:
+            if u.event_id and u.event_id not in self._events_by_id:
+                raise ValueError(
+                    f"usage {u.call_id} refers to unknown event {u.event_id}"
+                )
         for edge in self.influence:
             if edge.target_event not in self._events_by_id:
                 raise ValueError(
@@ -312,6 +385,7 @@ def read_trace(path: str | Path) -> Trace:
     events: list[Event] = []
     sources: list[Source] = []
     influence: list[InfluenceEdge] = []
+    usage: list[UsageRecord] = []
     for line_no, record in enumerate(_read_records(Path(path)), start=1):
         kind = record.get("record")
         if kind == "meta":
@@ -322,9 +396,17 @@ def read_trace(path: str | Path) -> Trace:
             sources.append(Source.from_dict(record))
         elif kind == "influence":
             influence.append(InfluenceEdge.from_dict(record))
+        elif kind == "usage":
+            usage.append(UsageRecord.from_dict(record))
         else:
             raise ValueError(f"{path}:{line_no}: unknown record type {kind!r}")
-    return Trace(meta=meta, events=events, sources=sources, influence=influence)
+    return Trace(
+        meta=meta,
+        events=events,
+        sources=sources,
+        influence=influence,
+        usage=usage,
+    )
 
 
 def _read_records(path: Path) -> Iterator[dict[str, Any]]:

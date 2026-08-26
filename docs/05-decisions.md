@@ -51,10 +51,15 @@ reporting agreement between them.
 ---
 
 ## D-004  LLM API and model
-Date: TODO
-Decided by: TODO
-Choice: TODO
-Reason: TODO — note budget, since counterfactual replay multiplies cost.
+Date: 26-08-2026
+Decided by: all three
+Choice: Gemini, `gemini-2.5-flash`, temperature 0. Model name is read from
+`GEMINI_MODEL` in `.env` and recorded in every trace header, so a run's
+numbers can always be tied to the model that produced them.
+Reason: Flash tier keeps the budget survivable. Counterfactual replay
+multiplies call count -- one flagged source on one event is one extra call,
+and docs/04 asks for three repeats across ~30 runs per scenario -- so the
+per-call price is the constraint that matters, not the per-call quality.
 
 ---
 
@@ -176,5 +181,71 @@ is contaminated. Without the field that link lives only in the call graph,
 which is exactly what we refuse to propagate along.
 Note: the same rule applies to tokens. Replay cost is charged to the event
 that is re-run; wrapping its output for a consumer costs nothing extra.
+
+---
+
+## D-013  Gemini over stdlib HTTP, no SDK dependency
+Date: 26-08-2026
+Decided by: proposed with the pipeline, needs group sign-off
+Choice: `src/common/llm.py` posts to the `generateContent` REST endpoint with
+`urllib.request`. No `google-genai`, no `requests`, no `python-dotenv`.
+Rejected: the `google-genai` SDK; the deprecated `google-generativeai`
+package that happens to be installed on one of our machines.
+Reason: the ground rules say ask before adding a dependency, and this needs
+about sixty lines. It also keeps retry, timeout and token extraction in code
+we can read, which matters because rate-limit behaviour under counterfactual
+replay is something we have to measure and report, not just survive.
+Revisit if we need streaming, function calling, or multimodal input; the
+transport is one method (`GeminiClient._post`) and swapping it is contained.
+Note: `google-generativeai` is deprecated upstream. If we ever do adopt an
+SDK it must be `google-genai`.
+
+---
+
+## D-014  Web and database tools read fixtures, not the live internet
+Date: 26-08-2026
+Decided by: proposed with the pipeline, needs group sign-off
+Choice: the web tool ranks a canned corpus in `src/tracing/fixtures/`; the
+database tool reads a fixture dict. `src/eval/` injects poisoned pages by
+passing a modified corpus to `Tools`, without touching tool code.
+Rejected: a real search API.
+Reason: two of our claims depend on it. Ground truth is known by
+construction only if we author what the tools return (open issue #3), and
+counterfactual replay only means anything if re-running an event without one
+source reproduces everything else exactly -- a live search result that
+changes between the original call and the replay would silently look like
+influence. Reproducibility here is a requirement, not a convenience.
+Consequence: state plainly in the paper that tool outputs are a fixed corpus.
+A reviewer will otherwise assume live retrieval and ask about drift.
+
+---
+
+## D-015  Thinking disabled (thinkingBudget 0)
+Date: 26-08-2026
+Decided by: proposed with the pipeline, needs group sign-off
+Choice: every call sets `thinkingConfig.thinkingBudget = 0`. The setting is
+recorded in the trace header.
+Rejected: leaving gemini-2.5-flash's default thinking on.
+Reason: thinking tokens are billed and would inflate the cost metric with
+work that is invisible in the trace, and variable-length internal reasoning
+is a second source of run-to-run variation on top of the one open issue #2
+already forces us to handle. `thoughts_tokens` is still recorded per call, so
+if we turn thinking back on for a scenario the cost stays separable.
+
+---
+
+## D-016  One API call per Researcher finding
+Date: 26-08-2026
+Decided by: proposed with the pipeline, needs group sign-off
+Choice: the Researcher answers each planned question in its own call,
+producing one `agent_output` event per finding.
+Rejected: one call returning all findings as a list.
+Reason: work preserved is counted per event (D-012), so replay cost has to be
+countable per event too. If one call produced four findings, "the cost of
+recomputing one finding" would be undefined, and that number is half of open
+issue #7. It also makes selective replay real rather than notional: replaying
+one contaminated finding is one call, not a re-run of all four.
+Cost: more prompt tokens overall, since the sources are re-sent per question.
+That overhead is real and belongs in the cost table rather than being hidden.
 
 ---
