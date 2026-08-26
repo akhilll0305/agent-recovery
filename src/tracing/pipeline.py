@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from src.common.config import Settings, load_settings
-from src.common.llm import GeminiClient, LLMResponse
+from src.common.llm import GeminiClient, LLMError, LLMResponse, QuotaExhausted
 from src.common.models import Event
 from src.tracing.logger import TraceLogger, read_trace
 from src.tracing.tools import Tools
@@ -70,6 +70,7 @@ class PipelineResult:
     stderr: str
     tokens: int
     events: int
+    throttled_s: float = 0.0
     detail: dict[str, Any] = field(default_factory=dict)
 
 
@@ -321,6 +322,7 @@ class GeminiPipeline:
             stderr=result["stderr"],
             tokens=self.client.total_tokens,
             events=len(self.log.events),
+            throttled_s=getattr(self.client, "throttled_s", 0.0),
             detail={
                 "expected": expected,
                 "produced": produced,
@@ -354,13 +356,40 @@ def run_pipeline(
 
 if __name__ == "__main__":
     target = sys.argv[1] if len(sys.argv) > 1 else "data/runs/gemini.jsonl"
-    outcome = run_pipeline(target)
+    try:
+        outcome = run_pipeline(target)
+    except (LLMError, RuntimeError) as exc:
+        # A run that dies mid-way still leaves a valid partial trace: the
+        # logger flushes every record as it is written (D-008). Say where it is and
+        # how far it got, instead of a stack trace.
+        print(f"run failed: {exc}")
+        print()
+        partial = Path(target)
+        if partial.exists():
+            trace = read_trace(partial)
+            spent = sum(u.total_tokens for u in trace.usage)
+            print(f"partial trace kept at {partial}")
+            print(f"  {len(trace.events)} events, {len(trace.usage)} calls, {spent} tokens spent")
+            if trace.events:
+                last = trace.events[-1]
+                print(f"  stopped after {last.id} ({last.agent_id}/{last.kind})")
+        print()
+        if isinstance(exc, QuotaExhausted):
+            print("The per-day quota is spent. Nothing to tune: the window has")
+            print("to reset, or the project needs a paid tier. See D-017 --")
+            print("one run of this pipeline costs 6 requests.")
+        else:
+            print("If this was a rate limit, check the ceiling with one call:")
+            print("  python -m src.common.llm --smoke")
+            print("and lower GEMINI_REQUESTS_PER_MINUTE in .env if it persists.")
+        raise SystemExit(1)
     trace = read_trace(outcome.trace_path)
     trace.validate()
 
     print(f"trace        {outcome.trace_path}")
     print(f"events       {outcome.events}   sources {len(trace.sources)}")
     print(f"tokens       {outcome.tokens}  by purpose {trace.tokens_by_purpose()}")
+    print(f"throttled    {outcome.throttled_s:.1f}s waiting on our own rate limiter")
     print(f"task success {outcome.task_success}")
     if not outcome.task_success:
         print(f"  expected {outcome.detail['expected']}")

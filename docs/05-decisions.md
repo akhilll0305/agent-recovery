@@ -278,3 +278,60 @@ Cost: more prompt tokens overall, since the sources are re-sent per question.
 That overhead is real and belongs in the cost table rather than being hidden.
 
 ---
+
+## D-017  Free-tier quota is 20 requests per day, and the plan does not fit in it
+Date: 26-08-2026
+Decided by: NOT DECIDED -- needs all three, this week
+Choice: open. The measurement is not open, and it is the reason this needs a
+decision now rather than in week 3.
+
+Measured against the live API on 26-08-2026:
+
+```
+quotaId    GenerateRequestsPerDayPerProjectPerModel-FreeTier
+quotaValue 20
+model      gemini-3.6-flash
+```
+
+Per **day**, per model, per project -- not per minute. Rejected requests
+appear to count against it, so a burst of 429s makes it worse rather than
+better.
+
+The arithmetic against docs/04:
+
+```
+one pipeline run                       6 requests  (planner 1, researcher 3, coder 2)
+  -> 3 runs per day, absolute ceiling
+30 runs x 3 scenarios                540 requests  original runs only
+B0 full restart baseline             540 requests  it re-runs everything
+counterfactual replay                 1 request per flagged source per event,
+                                      x3 repeats for non-determinism (docs/04)
+```
+
+Even before counterfactual checks -- the thing the paper is actually about --
+that is well over 1000 requests, or 50+ days of free-tier quota. We have one
+month, and week 2 is where the call count starts multiplying.
+
+Options, for the group to choose between:
+1. Enable billing on the API project. Costs money; makes the plan as written
+   feasible. Flash tier pricing is low, and D-015 already removed thinking
+   tokens, which were 92% of spend on a trivial call.
+2. Cut the experiment: fewer runs per scenario, fewer scenarios, or
+   counterfactual checks on a sampled subset with the sampling reported.
+   Cheaper, and honest if we say so, but it weakens the headline numbers and
+   open issue #3 already wants ~30 labelled runs per scenario.
+3. Spread runs across several API projects or keys. Works, but it is quota
+   evasion, it makes runs non-comparable across keys, and it is not something
+   to put in a paper.
+
+Recommendation: option 1, with option 2's sampling as the fallback if the
+budget is refused. Whatever is chosen, write the token and request counts into
+the paper -- open issue #7 asks for cost numbers, and "the method needed N
+requests" is exactly the kind of number a reviewer wants.
+
+Consequence for the code, already applied: the client now separates the
+per-minute limit (retryable, honours the server's suggested delay) from the
+per-day limit (fatal, `QuotaExhausted`). Backing off against a daily cap wasted
+152 seconds and several requests before this.
+
+---

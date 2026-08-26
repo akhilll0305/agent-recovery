@@ -53,6 +53,42 @@ class RetryPolicy:
 
 
 @dataclass
+class RateLimiter:
+    """Keep a minimum gap between calls.
+
+    Retrying is how you recover from a rate limit; pacing is how you avoid
+    one. They are not the same tool, and pacing is the one that matters here:
+    a 429 retry spends another request against the same per-minute quota, so
+    backing off *after* the fact digs the hole deeper. Free-tier Gemini allows
+    20 requests per minute on Flash, and counterfactual replay in week 2 will
+    sit right against that ceiling.
+
+    Not thread-safe. One run is sequential; if that changes, this needs a lock.
+    """
+
+    min_interval_s: float = 0.0
+    sleep: Callable[[float], None] = time.sleep
+    clock: Callable[[], float] = time.monotonic
+    total_waited_s: float = 0.0
+    _last_call: float | None = None
+
+    def wait(self) -> float:
+        """Block until the next call is allowed. Returns seconds waited."""
+        if self.min_interval_s <= 0:
+            return 0.0
+        now = self.clock()
+        if self._last_call is not None:
+            remaining = self.min_interval_s - (now - self._last_call)
+            if remaining > 0:
+                self.sleep(remaining)
+                self.total_waited_s += remaining
+                self._last_call = self.clock()
+                return remaining
+        self._last_call = now
+        return 0.0
+
+
+@dataclass
 class Attempt:
     """What it took to get an answer. Recorded per call so we can report how
     much of the wall-clock cost was rate limiting rather than model latency."""

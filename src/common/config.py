@@ -51,6 +51,17 @@ class Settings:
     max_output_tokens: int = 2048
     timeout_s: float = 60.0
     max_attempts: int = 5
+    # Free-tier Gemini Flash allows 20 generate_content requests per minute.
+    # We pace below it rather than discovering the ceiling with a 429, because
+    # a 429 retry spends another request against the same quota. Raise this
+    # the day someone puts a card on the account.
+    requests_per_minute: int = 15
+
+    def min_call_interval_s(self) -> float:
+        """Seconds to leave between calls. 0 disables pacing."""
+        if self.requests_per_minute <= 0:
+            return 0.0
+        return 60.0 / self.requests_per_minute
 
     def fingerprint(self) -> dict[str, object]:
         """Goes in the trace header. docs/04 run hygiene: log model, version,
@@ -60,6 +71,7 @@ class Settings:
             "temperature": self.temperature,
             "thinking_level": self.thinking_level,
             "max_output_tokens": self.max_output_tokens,
+            "requests_per_minute": self.requests_per_minute,
         }
 
 
@@ -124,6 +136,7 @@ def load_settings(path: str | Path = DEFAULT_ENV_PATH, **overrides: object) -> S
         max_output_tokens=get("max_output_tokens", int, 2048),
         timeout_s=get("timeout_s", float, 60.0),
         max_attempts=get("max_attempts", int, 5),
+        requests_per_minute=get("requests_per_minute", int, 15),
     )
     if overrides:
         raise TypeError(f"unknown settings: {sorted(overrides)}")
