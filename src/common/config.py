@@ -15,8 +15,12 @@ from pathlib import Path
 
 DEFAULT_ENV_PATH = ".env"
 
+# THE model name. Change it here and nowhere else: every other module reads
+# Settings.model, and the value lands in each trace header via fingerprint().
+# Overridable per machine with GEMINI_MODEL in .env.
 # Flash tier, per docs/01-scope.md (Gemini) and the budget note in D-004.
-DEFAULT_MODEL = "gemini-2.5-flash"
+# 26-08-2026: was gemini-2.5-flash, which now 404s for new API keys.
+DEFAULT_MODEL = "gemini-3.6-flash"
 
 
 class MissingAPIKey(RuntimeError):
@@ -32,7 +36,7 @@ class Settings:
     api_key: str
     model: str = DEFAULT_MODEL
     temperature: float = 0.0
-    # gemini-2.5-flash thinks by default. Thinking tokens are billed and are a
+    # Flash-tier models think by default. Thinking tokens are billed and are a
     # second source of run-to-run variation, so the testbed turns it off (0)
     # and records the setting. See D-015.
     thinking_budget: int = 0
@@ -71,6 +75,16 @@ def read_env_file(path: str | Path = DEFAULT_ENV_PATH) -> dict[str, str]:
     return values
 
 
+def normalise_model(name: str) -> str:
+    """Drop a leading "models/".
+
+    Gemini's own 404 message names the replacement as "models/gemini-3.6-flash",
+    and the endpoint URL already ends in /models -- pasting it verbatim gives
+    you a second 404 that looks identical to the first.
+    """
+    return name.strip().removeprefix("models/")
+
+
 def load_settings(path: str | Path = DEFAULT_ENV_PATH, **overrides: object) -> Settings:
     """Build Settings from .env plus the real environment.
 
@@ -96,7 +110,7 @@ def load_settings(path: str | Path = DEFAULT_ENV_PATH, **overrides: object) -> S
 
     settings = Settings(
         api_key=api_key,
-        model=get("model", str, DEFAULT_MODEL),
+        model=normalise_model(get("model", str, DEFAULT_MODEL)),
         temperature=get("temperature", float, 0.0),
         thinking_budget=get("thinking_budget", int, 0),
         max_output_tokens=get("max_output_tokens", int, 2048),

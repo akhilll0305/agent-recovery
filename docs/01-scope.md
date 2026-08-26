@@ -82,7 +82,7 @@ Writing actually starts day 8, not week 4 — draft sections as parts land.
 ## Open decisions
 
 - [x] LLM API: Gemini
-- [x] Which Gemini model for the agents: `gemini-2.5-flash`, temperature 0 (D-004)
+- [x] Which Gemini model for the agents: `gemini-3.6-flash`, temperature 0 (D-004)
 - [ ] Rate limit / quota tier: TODO — check before week 2
 - [ ] Target conference and deadline: to be assigned by our professor
 - [ ] Definition of "recovery succeeded": TODO — see 05-decisions.md

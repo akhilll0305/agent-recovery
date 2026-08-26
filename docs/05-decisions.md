@@ -53,9 +53,18 @@ reporting agreement between them.
 ## D-004  LLM API and model
 Date: 26-08-2026
 Decided by: all three
-Choice: Gemini, `gemini-2.5-flash`, temperature 0. Model name is read from
+Choice: Gemini, `gemini-3.6-flash`, temperature 0. Model name is read from
 `GEMINI_MODEL` in `.env` and recorded in every trace header, so a run's
 numbers can always be tied to the model that produced them.
+Amended 26-08-2026, same day: the original choice was `gemini-2.5-flash`,
+which returns 404 for API keys created now -- the API's own error names
+`models/gemini-3.6-flash` as the replacement. Recorded rather than quietly
+edited because it is a finding in its own right: a one-month project can have
+its model retired underneath it mid-schedule. Any run traced before this
+amendment carries the old model name in its header and is not comparable with
+runs after it. Consequence for docs/04 run hygiene: if we have already
+collected numbers on a scenario, all methods on that scenario must be re-run
+on the new model, not just the ones we happen to re-run next.
 Reason: Flash tier keeps the budget survivable. Counterfactual replay
 multiplies call count -- one flagged source on one event is one extra call,
 and docs/04 asks for three repeats across ~30 runs per scenario -- so the
@@ -225,7 +234,7 @@ Date: 26-08-2026
 Decided by: proposed with the pipeline, needs group sign-off
 Choice: every call sets `thinkingConfig.thinkingBudget = 0`. The setting is
 recorded in the trace header.
-Rejected: leaving gemini-2.5-flash's default thinking on.
+Rejected: leaving the Flash model's default thinking on.
 Reason: thinking tokens are billed and would inflate the cost metric with
 work that is invisible in the trace, and variable-length internal reasoning
 is a second source of run-to-run variation on top of the one open issue #2
