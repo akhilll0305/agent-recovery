@@ -10,7 +10,7 @@ Two things this client is strict about, because the paper depends on them:
   * every call returns its token counts, and the caller must say what the
     call was *for* (UsagePurpose). Cost split by purpose is the whole of
     open issue #7.
-  * temperature and thinking budget come from Settings and are recorded in
+  * temperature and thinking level come from Settings and are recorded in
     the trace header, so a run's numbers can be tied to its configuration.
 """
 
@@ -87,7 +87,7 @@ class GeminiClient:
                     self.settings.temperature if temperature is None else temperature
                 ),
                 "maxOutputTokens": self.settings.max_output_tokens,
-                "thinkingConfig": {"thinkingBudget": self.settings.thinking_budget},
+                "thinkingConfig": {"thinkingLevel": self.settings.thinking_level},
             },
         }
         if system:
@@ -167,3 +167,64 @@ def _retry_after(exc: urllib.error.HTTPError) -> float | None:
         return float(raw)
     except ValueError:
         return None  # HTTP-date form; our own backoff will cover it
+
+
+def smoke() -> int:
+    """One minimal live call, to check the API contract without a full run.
+
+        python -m src.common.llm --smoke
+
+    Exists because a model change breaks the request body, not the pipeline,
+    and finding that out costs a whole run's tokens otherwise. Prints the
+    request body it sent (never the key) so a 400 can be read against it.
+    """
+    from src.common.config import load_settings
+
+    settings = load_settings()
+    client = GeminiClient(settings)
+    print(f"model    {settings.model}")
+    print(f"settings {settings.fingerprint()}")
+
+    sent: dict[str, Any] = {}
+    original = client._post
+
+    def capture(body: dict[str, Any]) -> dict[str, Any]:
+        sent.clear()
+        sent.update(body)
+        return original(body)
+
+    client._post = capture  # type: ignore[method-assign]
+
+    try:
+        response = client.generate("Reply with the word ok.", system="You are terse.")
+    except Exception as exc:
+        print("\nrequest body:")
+        print(json.dumps(sent, indent=2))
+        print(f"\nFAILED: {exc}")
+        return 1
+
+    print(f"\ntext     {response.text.strip()[:60]!r}")
+    print(f"finish   {response.finish_reason}")
+    print(
+        f"tokens   prompt={response.prompt_tokens} output={response.output_tokens} "
+        f"thoughts={response.thoughts_tokens} total={response.total_tokens}"
+    )
+    print(f"call     attempts={response.attempts} latency={response.latency_s:.2f}s")
+    if response.thoughts_tokens:
+        # Not fatal, but it means the cost metric carries tokens that do not
+        # appear anywhere in the trace. Worth knowing before a batch of runs.
+        print(
+            f"\nWARNING: {response.thoughts_tokens} thought tokens were billed at "
+            f"thinking_level={settings.thinking_level!r}. See D-015."
+        )
+    print("\nOK")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    if "--smoke" in sys.argv:
+        raise SystemExit(smoke())
+    print("usage: python -m src.common.llm --smoke")
+    raise SystemExit(2)

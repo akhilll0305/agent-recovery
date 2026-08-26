@@ -23,6 +23,12 @@ DEFAULT_ENV_PATH = ".env"
 DEFAULT_MODEL = "gemini-3.6-flash"
 
 
+# Accepted by gemini-3.6-flash. "minimal" produced 0 thought tokens on every
+# prompt we tried, trivial and realistic alike; it is this model's replacement
+# for the thinkingBudget=0 that 2.5 Flash accepted. See D-015.
+THINKING_LEVELS: frozenset[str] = frozenset({"minimal", "low", "high"})
+
+
 class MissingAPIKey(RuntimeError):
     """Raised with instructions rather than a bare KeyError, because this is
     the first thing that goes wrong on a new machine."""
@@ -37,9 +43,11 @@ class Settings:
     model: str = DEFAULT_MODEL
     temperature: float = 0.0
     # Flash-tier models think by default. Thinking tokens are billed and are a
-    # second source of run-to-run variation, so the testbed turns it off (0)
-    # and records the setting. See D-015.
-    thinking_budget: int = 0
+    # second source of run-to-run variation, so the testbed asks for as little
+    # as the model allows and records the setting. gemini-3.6-flash rejects the
+    # thinkingBudget=0 that 2.5 Flash accepted; "minimal" is the way to get
+    # zero thought tokens on this model. See D-015.
+    thinking_level: str = "minimal"
     max_output_tokens: int = 2048
     timeout_s: float = 60.0
     max_attempts: int = 5
@@ -50,7 +58,7 @@ class Settings:
         return {
             "model": self.model,
             "temperature": self.temperature,
-            "thinking_budget": self.thinking_budget,
+            "thinking_level": self.thinking_level,
             "max_output_tokens": self.max_output_tokens,
         }
 
@@ -112,11 +120,18 @@ def load_settings(path: str | Path = DEFAULT_ENV_PATH, **overrides: object) -> S
         api_key=api_key,
         model=normalise_model(get("model", str, DEFAULT_MODEL)),
         temperature=get("temperature", float, 0.0),
-        thinking_budget=get("thinking_budget", int, 0),
+        thinking_level=get("thinking_level", str, "minimal"),
         max_output_tokens=get("max_output_tokens", int, 2048),
         timeout_s=get("timeout_s", float, 60.0),
         max_attempts=get("max_attempts", int, 5),
     )
     if overrides:
         raise TypeError(f"unknown settings: {sorted(overrides)}")
+    if settings.thinking_level not in THINKING_LEVELS:
+        # Catch it here rather than as an opaque 400 from the API. The server
+        # is the authority; this list is what we have verified.
+        raise ValueError(
+            f"GEMINI_THINKING_LEVEL {settings.thinking_level!r} not one of "
+            f"{sorted(THINKING_LEVELS)}"
+        )
     return settings

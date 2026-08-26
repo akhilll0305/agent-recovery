@@ -229,17 +229,37 @@ A reviewer will otherwise assume live retrieval and ask about drift.
 
 ---
 
-## D-015  Thinking disabled (thinkingBudget 0)
+## D-015  Thinking minimised (thinkingLevel "minimal")
 Date: 26-08-2026
 Decided by: proposed with the pipeline, needs group sign-off
-Choice: every call sets `thinkingConfig.thinkingBudget = 0`. The setting is
-recorded in the trace header.
+Choice: every call sets `thinkingConfig.thinkingLevel = "minimal"`. The
+setting is recorded in the trace header, and `thoughts_tokens` is recorded
+per call whatever the setting says.
 Rejected: leaving the Flash model's default thinking on.
 Reason: thinking tokens are billed and would inflate the cost metric with
 work that is invisible in the trace, and variable-length internal reasoning
 is a second source of run-to-run variation on top of the one open issue #2
 already forces us to handle. `thoughts_tokens` is still recorded per call, so
 if we turn thinking back on for a scenario the cost stays separable.
+Amended 26-08-2026, same day: the mechanism changed, the decision did not.
+`thinkingBudget: 0` is what gemini-2.5-flash accepted; gemini-3.6-flash
+rejects it with 400 INVALID_ARGUMENT, which is what broke the first live run
+after the model change (D-004). Bisecting the request body one field at a
+time found `thinkingBudget` to be the only offending field -- JSON response
+mode is fine. This model takes `thinkingLevel` instead, one of minimal, low,
+high. "minimal" returned 0 thought tokens on both a trivial prompt and a
+realistic Researcher prompt, so the intent of this decision survives intact.
+Measured, for the paper: with thinking left at its default, "Reply with the
+word ok." cost 98 tokens of which 90 were thoughts. Roughly 92% of the spend
+on that call would have been invisible in the trace. That is the size of the
+distortion this decision avoids, and it is worth one line in the cost section.
+Consequence if a future model will not go to zero: the cost metric would
+carry tokens that appear nowhere in the event graph. It stays *separable*
+because `UsageRecord.thoughts_tokens` is recorded per call regardless, so the
+honest move then is to report thought tokens as their own column rather than
+fold them into the totals. Do not quietly leave them in.
+`python -m src.common.llm --smoke` now checks the request contract with one
+call, so the next model change costs one call to diagnose, not a whole run.
 
 ---
 
