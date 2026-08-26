@@ -44,6 +44,7 @@ Event(
                    # memory_write | agent_output | plan | decision
     parents,       # [event ids]
     inputs_ref,    # references into the content store
+    exposures,     # [source ids] present in this agent's context (D-011)
     output_ref,
     tool_id,       # optional
     timestamp,

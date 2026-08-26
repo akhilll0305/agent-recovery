@@ -77,3 +77,79 @@ everyone at once and burns days.
 ---
 
 <!-- append new decisions below -->
+
+## D-007  Automatic parent links are same-agent only
+Date: 26-08-2026
+Decided by: proposed with the trace layer, needs group sign-off
+Choice: `TraceLogger.log_event(parents=None)` links the new event to the
+previous event logged by the same agent. Cross-agent links (Planner ->
+Researcher) must be passed explicitly; `parents=[]` marks a root event.
+Rejected: linking to the previous event overall (whichever agent produced it).
+Reason: chronological adjacency is not derivation. Auto-linking across
+agents would manufacture edges that look like data flow, and contamination
+that propagates along a manufactured edge is exactly the baseline error we
+claim to avoid. Guessing wrongly here would flatter the baseline and could
+also hide a real edge.
+
+---
+
+## D-008  Trace file format: one JSONL file per run, tagged records
+Date: 26-08-2026
+Decided by: proposed with the trace layer, needs group sign-off
+Choice: one `.jsonl` per run under `data/runs/`. Each line is a JSON object
+tagged with `"record"`: `meta`, `source`, `event`, or `influence`. Lines are
+flushed as written.
+Rejected: separate files per record type; a single JSON document written at
+the end; SQLite.
+Reason: append-only means a crashed or attacked run still leaves a readable
+trace, and one file per run keeps a run self-contained for `data/runs/`
+hygiene (docs/04). Both graphs rebuild from this one file. Revisit only if
+trace size becomes a measured problem (open issue #8).
+
+---
+
+## D-009  Source content is stored inline; event content is stored by reference
+Date: 26-08-2026
+Decided by: proposed with the trace layer, needs group sign-off
+Choice: `Source.content` holds the text. `Event.inputs_ref` / `output_ref`
+hold opaque content-store keys, not text.
+Rejected: inlining event content too; referencing source content too.
+Reason: matches the storage policy in docs/02 — source content is always
+needed for counterfactual replay, event content is only needed at
+checkpoints. The content store itself is not built yet; refs are opaque
+strings until it is.
+
+---
+
+## D-010  No content store yet; refs stay opaque
+Date: 26-08-2026
+Decided by: all three
+Choice: `Event.inputs_ref` and `Event.output_ref` stay opaque strings. No
+content store is built until selective replay actually needs event content.
+Rejected: building the content store in week 1 alongside the trace layer.
+Reason: nothing in weeks 1-2 reads event content. The graphs are built from
+metadata, and counterfactual replay reads `Source.content`, which is stored
+inline (D-009). Building a store now would be guessing at the interface
+replay wants. The field names are already in the frozen schema, so adding
+the store later does not change the models.
+Consequence: `data/runs/*.jsonl` is not yet enough to replay a run. It is
+enough to rebuild both graphs, which is the week-1 exit test.
+
+---
+
+## D-011  Exposure is a field on Event, recorded at logging time
+Date: 26-08-2026
+Decided by: all three
+Choice: `Event.exposures` holds the source ids present in the agent's
+context for that operation. Written by whoever runs the agent, at the moment
+the call is made.
+Rejected: a separate exposure record; deriving exposure inside
+`src/provenance/` after the run.
+Reason: exposure is an observation about the prompt, not an analysis result,
+and it cannot be reconstructed once the run is over. It also is not a
+provenance detail -- the exposure/influence gap *is* the paper's claim, so it
+belongs in the trace next to the operation it describes. Keeping it on Event
+means a trace file alone contains both sets, and figure 2 (exposure graph vs
+influence graph, docs/04) can be drawn from one file.
+
+---
