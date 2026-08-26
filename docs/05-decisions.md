@@ -153,3 +153,28 @@ means a trace file alone contains both sets, and figure 2 (exposure graph vs
 influence graph, docs/04) can be drawn from one file.
 
 ---
+
+## D-012  Work is counted in events, never in sources
+Date: 26-08-2026
+Decided by: all three
+Choice: the unit for every metric in docs/04-experiments.md is the **event**.
+An agent output appears twice in a trace -- as the event that produced it
+(e0006) and as the source a later agent consumed (S6). Those are one piece of
+work. The source carries `Source.derived_from = "e0006"` and is never counted.
+`Trace.work_units()` is the single definition; metrics start there rather than
+each deciding for itself.
+Rejected: counting sources; counting both; counting only agent_output events.
+Reason: "work preserved" has to mean recomputation avoided, and recomputation
+happens per event. A source derived from an event costs nothing to reproduce
+once that event exists, so counting it would inflate work preserved -- for us
+*and* for the baselines, but unevenly, because our method preserves more of
+exactly the derived kind. That is a silent way to manufacture our own result.
+`Trace.validate()` now rejects two sources wrapping one event.
+Note: `derived_from` is also the edge contamination crosses between agents.
+If e0006 is contaminated then S6 is contaminated, and any event S6 influences
+is contaminated. Without the field that link lives only in the call graph,
+which is exactly what we refuse to propagate along.
+Note: the same rule applies to tokens. Replay cost is charged to the event
+that is re-run; wrapping its output for a consumer costs nothing extra.
+
+---

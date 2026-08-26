@@ -19,6 +19,12 @@ Every model round-trips through plain JSON-compatible dicts:
 Vocabulary note (CLAUDE.md): *exposure* is a source being present in an
 agent's context; *influence* is a source demonstrably changing the output.
 An InfluenceEdge records influence only. Exposure is recorded separately.
+
+Counting rule (D-012): **work is measured in events, never in sources.**
+An agent output exists twice in a trace -- once as the event that produced
+it (e0006) and once as the source a later agent consumed (S6, carrying
+`derived_from="e0006"`). They are one piece of work. Every metric in
+docs/04-experiments.md counts the event and ignores the source.
 """
 
 import json
@@ -194,6 +200,11 @@ class Source:
 
     origin_event  the event that brought this source in (tool_response,
                   memory_read, message, ...). None for the user instruction.
+    derived_from  set when this source IS the output of an earlier event in
+                  this run (an agent output consumed downstream). The source
+                  and that event are the same work, counted once, as the event
+                  (D-012). Also the link contamination crosses when it moves
+                  from a producing agent to a consuming one.
     malicious     GROUND TRUTH, FOR EVALUATION ONLY. Set by attack injection
                   in src/eval/ and read only by src/eval/ when scoring a run.
                   Nothing in src/provenance/ or src/recovery/ may ever read
@@ -210,6 +221,7 @@ class Source:
     kind: SourceKind
     content: str
     origin_event: str | None = None
+    derived_from: str | None = None
     malicious: bool = False
     timestamp: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -232,6 +244,7 @@ class Source:
             "kind": self.kind,
             "content": self.content,
             "origin_event": self.origin_event,
+            "derived_from": self.derived_from,
             "malicious": self.malicious,
             "timestamp": self.timestamp,
             "metadata": dict(self.metadata),

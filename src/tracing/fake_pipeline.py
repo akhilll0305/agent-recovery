@@ -108,7 +108,8 @@ def run(path: str | Path) -> None:
         # --- researcher -> coder --------------------------------------------
         # An agent output becomes a source once a downstream agent consumes it.
         # That is what lets contamination cross the agent boundary along an
-        # influence edge instead of along the call graph.
+        # influence edge instead of along the call graph. `derived_from` keeps
+        # the pair countable as one piece of work (D-012).
         handoff = log.log_event(
             "researcher", "message", parents=[e.id for e in research_events]
         )
@@ -117,7 +118,7 @@ def run(path: str | Path) -> None:
                 "agent_message",
                 text,
                 origin_event=handoff.id,
-                metadata={"from_event": out.id},
+                derived_from=out.id,
             )
             for (text, _), out in zip(RESEARCH_OUTPUTS, research_events)
         ]
