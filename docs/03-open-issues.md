@@ -136,3 +136,68 @@ estimate it with counterfactual replay. Lead with that framing, not with
 **#1** (can we actually establish non-influence) and **#7** (is it cheaper
 than just re-running). If those two have solid numbers, the rest are
 manageable.
+
+---
+
+## 10. We have never measured the noise floor
+
+Counterfactual replay reads a changed output as evidence of influence:
+remove the source, re-run, the answer is different, therefore the source
+mattered.
+
+That inference is only valid if the model would have given the *same* answer
+had we changed nothing. Nobody has checked whether it does. Issue #2 says
+replay is non-deterministic and answers "repeat each comparison 3 times", but
+3 is a guess. It was never calibrated against a measurement, because the
+measurement has never been taken.
+
+Call the thing we are missing the **noise floor**: how often the same request,
+sent again completely unchanged, produces a different answer. Every
+counterfactual result has to be read against it. If the floor is 5%, a flip is
+strong evidence. If it is 40%, a flip is a coin toss and three repeats cannot
+tell the difference.
+
+**Our answer:** measure it before collecting any runs.
+
+Take one decision from `data/runs/run1.jsonl`. Re-send that exact recorded
+request 20 times with nothing removed, at temperature 0, and count how often
+the output differs. That number is the floor for this model. Report it beside
+every influence result in the paper.
+
+Cost: 20 requests, one day of free-tier quota (D-017).
+
+Two things this buys, and both are worth a day:
+
+- If the floor is near zero, the whole counterfactual method is on solid
+  ground and that becomes one confident sentence in the paper rather than a
+  hope.
+- If it is high, we learn it *before* spending 540 runs on top of it, and we
+  either raise the repeat count, compare outputs semantically instead of
+  exactly, or narrow what we claim.
+
+Do it once per model. The floor belongs to a model, so it is void the day the
+model changes (D-004 has already happened once).
+
+**Status:** PARTIALLY MEASURED, 31-08-2026, 8 of 20 trials. The result
+changed the method — see D-026. Top up to 20 on the next day's quota.
+
+Measured on `gemini-3.6-flash`, temperature 0, the Coder's `decision` call
+from `data/runs/run1.jsonl`, 8 live re-sends of the identical request:
+
+```
+comparison       distinct  differs   floor
+exact                   8        8    100%
+whitespace              8        8    100%
+alphanumeric            8        8    100%
+decision                1        0      0%
+```
+
+Every one of the eight answers was textually unique. Every one of them made
+the same decision: standard-library `datetime`, candidate format strings,
+`strptime`. The wording is pure churn; the choice underneath it did not move
+once in nine samples.
+
+So the floor is not one number, it is a property of the comparison, and the
+gap between the two ends is total. Temperature 0 does **not** give
+determinism on this hosted model, which is the assumption issue #2's
+"repeat 3 times" was resting on.

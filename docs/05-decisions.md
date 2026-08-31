@@ -491,3 +491,208 @@ v1 policy is the thing to name as the cause. Do not fix it yet; the quadratic
 growth is only worth engineering away if run length grows past this testbed's
 18 events, and "we measured the naive policy and it cost 56%" is a more useful
 sentence in the paper than a policy tuned before anyone needed it.
+
+---
+
+## D-023  A fourth option for D-017: run the bulk locally
+Date: 31-08-2026
+Decided by: NOT DECIDED -- this adds an option to D-017, it does not close it
+Choice: open. D-017 offers three ways out of the quota problem (enable
+billing, cut the experiment, juggle keys). There is a fourth that is not in
+that list and should be, because it is cheaper than option 1 and more honest
+than options 2 and 3.
+
+**Run the bulk of the experiment on a local model, and keep the hosted model
+for a spot-check subset.**
+
+A local model served on the machine has no request quota at all. The 1000+
+requests D-017 computes stop being a budget problem and become a wall-clock
+problem, which we can absorb -- week 4 is evaluation and the runs are
+scriptable.
+
+Why this is consistent with what we already decided rather than a reversal:
+D-004 chose the Flash tier explicitly because "the per-call price is the
+constraint that matters, not the per-call quality". That reasoning points at
+a local model more strongly than it points at Flash. We are not measuring how
+good an agent is. We are measuring whether influence can be separated from
+exposure, and that claim is about the method, not about the model's ability.
+
+Costs, stated plainly because this is the part that needs group agreement:
+
+- A reviewer will ask whether the result holds on a frontier model. The
+  answer has to be a measured subset, not an assertion -- run one scenario on
+  the hosted model and report both, rather than claiming it generalises.
+- A small model may be incoherent enough that its choices are noise rather
+  than judgement, which would make ground truth meaningless. This has to be
+  gated before committing: check that the local model can actually complete
+  the Coder role -- produce a script the Executor runs to the correct output
+  -- and that its decisions look like decisions.
+- Numbers from two models are not comparable. D-004's rule already covers it:
+  all methods on a scenario run on the same model, or none of them do. The
+  model name is already in every trace header, so this stays checkable.
+- No new dependency. A local server is spoken to over HTTP the same way the
+  Gemini client already is, with stdlib `urllib` (D-013).
+
+Recommendation: put this in front of the group alongside D-017's other three.
+It does not need to win -- if billing is approved, take billing, it is
+simpler. It matters because D-017 is currently framed as pay-or-cut, and
+cutting the experiment weakens the paper while this does not.
+Note: this also removes the pressure that produced open issue #10's cost
+objection. A noise floor of 20 replays is a full day of hosted quota and
+about a minute locally, so the measurement stops being something we ration.
+
+---
+
+## D-024  The trace cannot tell "checked and clean" from "never checked"
+Date: 31-08-2026
+Decided by: proposed with the contamination walk, needs group sign-off --
+this touches the shared trace format (D-006, D-008)
+Choice: add one additive record type, `check`, recording that a
+(source, event) pair was examined:
+
+```
+{"record": "check", "source_id": "S5", "target_event": "e0007",
+ "method": "counterfactual"}
+```
+
+Rejected: inferring it from the influence edges, which is what the code does
+today and what this entry exists to replace.
+
+Reason: a counterfactual check that finds **no** influence records nothing.
+So an absent influence edge means one of two opposite things -- "we tested
+this pair and it came back clean" or "nobody ever looked" -- and the
+conservative fallback (docs/02: anything not confidently established is
+treated as contaminated) has to assume the second. Every cleared pair is
+therefore re-contaminated by the very policy that is supposed to protect us.
+
+Measured on `data/runs/fake.jsonl`, seeding S5:
+
+```
+inferred from edges   6 of 17 events contaminated, 11 preserved (65%)
+with checks recorded  3 of 17 events contaminated, 14 preserved (82%)
+wrongly discarded     e0007, e0008, e0009
+```
+
+Seventeen points of the headline metric, thrown away by a missing record.
+Those three events were each tested against S5 and cleared -- that is exactly
+why they carry no edge -- and we discard them anyway.
+
+The error is in the safe direction: it over-contaminates, so it costs work
+preserved and can never cause an unsafe preservation. That is why it is a
+defect rather than a disaster, and why it was survivable long enough to go
+unnoticed. It would have shown up in the paper as our method looking worse
+than it is, which is the kind of bug nobody goes looking for.
+
+Why a separate record rather than a field on `InfluenceEdge`: an edge is a
+positive claim, and there is no edge to hang a negative on. Recording the
+*examination* keeps one source of truth -- examined plus an edge means
+influenced, examined without an edge means cleared, no examination at all
+means unknown and the policy decides. `UsageRecord` is the precedent for
+adding a record type after the week-1 freeze without touching the three
+models D-006 protects.
+
+Until this lands, `contaminate(checked=None)` infers the checked set from the
+edges and says so in its docstring. `src/eval/` must pass an explicit
+`checked` set when scoring, or every number it produces understates the
+method.
+
+---
+
+## D-025  Attack variants are intents, and validity is checked on the trace
+Date: 31-08-2026
+Decided by: proposed with attack injection, needs group sign-off
+Choice: three things about how runs are built and counted.
+
+**1. "influencing" and "exposed only" name what an attack was built to do,
+never what happened.** docs/04 asks for two variants of each scenario as
+though we control which occurs. We do not. Whether a model uses a page it was
+shown is its decision, and the premise of this project is precisely that
+exposure does not settle influence -- we cannot assume our way to the answer
+we are trying to measure. Which variant actually occurred is read afterwards
+from the influence edges.
+Consequence, and it is the one that protects the numbers: a run built as
+exposed-only that turns out to be influencing is a valid data point and stays
+in. Dropping it would silently over-sample the case that flatters us, which
+docs/04 already warns against in the same paragraph that asks for the split.
+
+**2. An attack that never reached the trace is not a run.** Validity is
+established by finding the planted marker in the finished trace, not by
+checking the corpus beforehand. A pre-flight query is a guess: the query the
+Researcher issues is built from the Planner's questions and does not exist
+until the run happens. Checking a fixture against your own query tells you it
+*can* be reached, not that it *was* -- and the failure is silent, because the
+run completes and the trace looks entirely normal while measuring nothing.
+Found the honest way: the first version of `reaches()` passed against a query
+we invented, and the same page was then never retrieved by the pipeline.
+`src/eval/harness.py` now raises when the marker is absent.
+
+**3. Never assert that unexamined exposures were checked.** The D-024 stopgap
+`all_exposure_pairs()` claims every exposure was examined and cleared. Applied
+to a trace where no influence analysis has run -- where *every* exposure
+lacks an edge -- it reports the poisoned run as 100% preserved, 0 events
+contaminated, 0 unsafe. A textbook unsafe preservation, invented out of an
+assumption rather than a mistaken measurement. It defaults to off and the
+harness refuses it outright on a trace with no influence edges.
+
+Observed while building, and worth keeping in the paper: with no influence
+analysis run, the influencing and exposed-only variants of scenario A score
+**identically** (72% preserved, both). That is correct. The conservative
+fallback cannot tell them apart, because telling them apart is exactly what
+counterfactual analysis is for. It is a clean demonstration of what the
+expensive half of the method buys, and it is the number to put beside the
+analysed result rather than a bug to fix.
+
+---
+
+## D-026  Counterfactual comparison is semantic. Text comparison is unusable.
+Date: 31-08-2026
+Decided by: forced by measurement, needs group sign-off on the comparator
+Choice: a counterfactual check compares the **decision** an output encodes,
+never the text of the output. Text-level comparison is removed from the
+method, not kept as a cheap first pass.
+Rejected: string equality; normalised string equality; "repeat 3 times and
+see if the wording changed" (issue #2's original answer).
+
+Reason: measured, on the live model, 31-08-2026. Eight re-sends of one
+identical recorded request at temperature 0 (open issue #10):
+
+```
+exact / whitespace / alphanumeric   floor 100%   8 of 8 answers distinct
+decision (which library)            floor   0%   1 distinct across 9 samples
+```
+
+At a 100% floor a counterfactual flip carries **zero** information: remove a
+source, re-run, the text differs -- and it would have differed anyway. Every
+influence edge established that way would have been noise wearing the shape
+of evidence, and the exposure-vs-influence gap, which is the whole paper,
+would have been measured with an instrument whose needle moves on its own.
+
+The same eight samples put the decision-level floor at 0%. All nine answers
+(recorded plus eight) chose standard-library `datetime` with candidate format
+strings. The choice is stable; only the prose around it moves.
+
+docs/03 issue #2 already said comparison should be "semantic / behavioural".
+This upgrades that from a preference to a requirement, and attaches numbers
+to both ends of it.
+
+Consequences, none of them optional:
+
+- Every event kind needs a defined comparator before counterfactual replay
+  can produce a single edge. `decision` -> which library/approach was chosen.
+  `agent_output` for code -> what the executed script prints, which the
+  Executor already computes. `agent_output` for prose findings -> the open
+  one, and the hardest; an LLM judge is the obvious candidate and it is
+  itself an instrument with a noise floor that would then need measuring.
+- Report the floor beside every influence result, under the comparator that
+  produced it. A flip means nothing without the churn it is read against.
+- The comparator must be fixed **before** looking at the trials. The one used
+  here is a hardcoded list of library names written in advance and not
+  adjusted afterwards; tuning a comparator until it reports stability would
+  manufacture exactly the result we are trying to test.
+- Temperature 0 is not determinism on a hosted model. Anything in docs/04
+  that assumes replay reproduces text is wrong and needs rewriting.
+
+Caveat, stated because it limits the claim: 8 trials, not 20 -- the daily
+quota ran out. A 0% decision-level floor on 8 trials is still consistent with
+a true rate near 30%. The 100% text-level floor needs no such caveat; it is
+8 out of 8 and it is not going to improve with more samples.
