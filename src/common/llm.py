@@ -199,8 +199,16 @@ class GeminiClient:
                 ) from exc
             raise LLMError(f"HTTP {exc.code}: {info.message}") from exc
         except urllib.error.URLError as exc:
-            # DNS, connection reset, timeout. Transient by nature.
+            # DNS, connection refused, TLS failure. Transient by nature.
             raise Retryable(f"network error: {exc.reason}") from exc
+        except OSError as exc:
+            # A read timeout *after* the connection is established arrives as a
+            # bare TimeoutError. That is an OSError but not a URLError, so the
+            # clause above never saw it: it escaped the retry loop entirely and
+            # then escaped the partial-trace handler in __main__ as well. That
+            # is how a recoverable network stall killed the first live run four
+            # calls in, with a stack trace instead of the trace report. D-020.
+            raise Retryable(f"network error: {type(exc).__name__}: {exc}") from exc
 
 
 # "Please retry in 4.458328969s." -- the number we actually need, buried in

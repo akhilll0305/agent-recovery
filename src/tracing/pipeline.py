@@ -445,7 +445,7 @@ if __name__ == "__main__":
             cassette_path=record or replay,
             cassette_mode="record" if record else "replay",
         )
-    except (LLMError, RuntimeError) as exc:
+    except (LLMError, RuntimeError, OSError) as exc:
         # A run that dies mid-way still leaves a valid partial trace: the
         # logger flushes every record as it is written (D-008). Say where it is
         # and how far it got, instead of a stack trace.

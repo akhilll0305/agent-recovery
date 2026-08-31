@@ -49,7 +49,10 @@ class Settings:
     # zero thought tokens on this model. See D-015.
     thinking_level: str = "minimal"
     max_output_tokens: int = 2048
-    timeout_s: float = 60.0
+    # Generous on purpose. Under a 20-requests-per-day quota (D-017) a
+    # retry costs a request and waiting costs nothing, so the timeout is
+    # set well past any plausible generation time. See D-020.
+    timeout_s: float = 120.0
     max_attempts: int = 5
     # Free-tier Gemini Flash allows 20 generate_content requests per minute.
     # We pace below it rather than discovering the ceiling with a 429, because
@@ -122,6 +125,9 @@ def load_settings(path: str | Path = DEFAULT_ENV_PATH, **overrides: object) -> S
             ".env is gitignored."
         )
 
+    # NOTE: the defaults below are stated a second time, next to the Settings
+    # fields. Keep the two in step -- changing only the dataclass default has
+    # no effect on a Settings built through this function, which is all of them.
     def get(name: str, cast, default):
         if name in overrides:
             return cast(overrides.pop(name))
@@ -134,7 +140,7 @@ def load_settings(path: str | Path = DEFAULT_ENV_PATH, **overrides: object) -> S
         temperature=get("temperature", float, 0.0),
         thinking_level=get("thinking_level", str, "minimal"),
         max_output_tokens=get("max_output_tokens", int, 2048),
-        timeout_s=get("timeout_s", float, 60.0),
+        timeout_s=get("timeout_s", float, 120.0),
         max_attempts=get("max_attempts", int, 5),
         requests_per_minute=get("requests_per_minute", int, 15),
     )

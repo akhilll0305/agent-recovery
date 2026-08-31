@@ -389,3 +389,105 @@ live call -- silently spending the day's quota on a changed prompt is exactly
 the failure this is meant to prevent.
 
 ---
+
+## D-020  Socket-level errors are retryable; timeout raised to 120s
+Date: 31-08-2026
+Decided by: proposed with the first successful live run, needs group sign-off
+Choice: `GeminiClient._post` catches `OSError` after `urllib.error.URLError`
+and converts it to `Retryable`. `Settings.timeout_s` goes 60 -> 120.
+Rejected: leaving the timeout at 60 and relying on retries.
+
+Reason: the first live run of the full pipeline died four calls in, on the
+third Researcher finding, with a bare `TimeoutError` and a stack trace. A read
+timeout that happens *after* the connection is established is an `OSError` but
+**not** a `URLError`, so the `except urllib.error.URLError` clause never saw
+it. Two things followed from that one gap, and both are worse than the timeout
+itself:
+
+  * it bypassed the retry loop entirely -- `max_attempts=5` was configured and
+    never used, because `with_retry` only retries `Retryable`
+  * it bypassed the `except (LLMError, RuntimeError)` handler in
+    `pipeline.__main__` too, so the run printed a traceback instead of the
+    partial-trace report that D-008's append-only format exists to make
+    possible. `OSError` is now in that tuple as well.
+
+The timeout goes up rather than the retry count because of D-017: under a
+20-requests-per-day quota, **waiting is free and retrying costs a request**.
+120s is far past any plausible generation time for this model at
+`max_output_tokens=2048` -- the call that stalled had produced ~700 output
+tokens in ~4s on the two calls either side of it, so this was a network stall,
+not slow generation.
+
+Cost of the lesson, for the record: the aborted attempt spent 5 requests (4
+answered, 1 timed out) of that day's 20.
+
+Consequence for the cost metric, and it is a real one: **a timed-out request
+costs quota but contributes no tokens to the trace.** The server generated an
+answer we never received. So "requests spent" and "calls recorded in the
+trace" are not the same number, and open issue #7 wants the first.
+`UsageRecord.attempts` captures retries within a call that eventually
+succeeded; a call that fails outright records nothing at all. When we report
+request counts in the paper, count attempts, and say that failed attempts are
+included.
+Note while fixing: `load_settings()` restates every default a second time
+alongside the `Settings` field defaults, so changing the dataclass default
+alone does nothing. Both were updated and a comment now says so. Worth
+collapsing if it bites anyone again.
+
+---
+
+## D-021  A `--record` run is a live run; only `"cassette": "replay"` disqualifies
+Date: 31-08-2026
+Decided by: proposed with the first successful live run, needs group sign-off
+Choice: refine D-019's header rule. Paper numbers may come from a trace whose
+header says `"cassette": "record"`. They may never come from one that says
+`"cassette": "replay"`.
+Rejected: D-019's literal wording, "every table comes from runs with no
+`cassette` key in the header".
+
+Reason: D-019 was written before a recording run had ever succeeded, and its
+rule reads on the presence of the key rather than on its value. Taken
+literally it disqualifies the very run that produces the cassette -- a run in
+which every request was genuinely made, every token genuinely spent, and every
+latency genuinely measured. Recording is a side effect of that run, not a
+substitute for it. Enforcing the rule as written would have meant spending
+another 6 requests to re-run the identical pipeline with recording off, which
+buys nothing and costs a third of a day's quota.
+
+The thing D-019 is actually protecting against is a number that describes a
+request that never happened. That is exactly and only the `replay` case. The
+distinction is checkable in the header either way, which was D-019's real
+point.
+Unchanged: `latency_s` and `attempts` from a replayed run mean nothing, a
+cassette miss still raises rather than falling through to a live call, and no
+replayed number goes in a table.
+
+---
+
+## D-022  Checkpoint overhead re-measured on a real run: 56%, not 26%
+Date: 31-08-2026
+Decided by: measurement, no choice to make
+Choice: none. D-018 asked for this number to be re-measured on real runs
+rather than on the fake pipeline, so here it is.
+
+Measured on `data/runs/run1.jsonl`, the first complete live run, 18 events,
+4640 tokens, v1 checkpoint policy of one per agent boundary:
+
+```
+trace         12,493 B
+checkpoints   16,080 B   across 4 checkpoints
+checkpoint share   56% of stored bytes
+```
+
+D-018 measured 26% on a run of the same event count. The gap is entirely real
+model output: a checkpoint carries `outputs`, the accumulated text of every
+event so far, and the fake pipeline's stub text is a fraction of the length of
+what the model actually writes. Checkpoints therefore grow with the *square*
+of run length under the v1 policy -- each one re-serialises every output
+before it -- while the trace grows linearly.
+
+Consequence: 56% is the number to quote for open issue #8, not 26%, and the
+v1 policy is the thing to name as the cause. Do not fix it yet; the quadratic
+growth is only worth engineering away if run length grows past this testbed's
+18 events, and "we measured the naive policy and it cost 56%" is a more useful
+sentence in the paper than a policy tuned before anyone needed it.
