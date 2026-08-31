@@ -79,6 +79,20 @@ INFLUENCE_METHODS: frozenset[str] = frozenset(
     {"self_report", "counterfactual", "assumed"}
 )
 
+# What an API call was spent on. The cost metric in docs/04 splits recovery
+# cost into analysis and replay, so every call has to declare which it is at
+# the moment it is made.
+UsagePurpose = Literal[
+    "pipeline",       # the original run
+    "self_report",    # asking an agent which inputs it used
+    "counterfactual", # re-running an event with a source removed
+    "replay",         # recomputing an invalidated event
+    "verification",   # checking a recovered output
+]
+USAGE_PURPOSES: frozenset[str] = frozenset(
+    {"pipeline", "self_report", "counterfactual", "replay", "verification"}
+)
+
 
 # --- id helpers --------------------------------------------------------------
 # One place, so tracing / provenance / eval all format ids identically.
@@ -296,6 +310,75 @@ class InfluenceEdge:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "InfluenceEdge":
+        return cls(**_check_keys(cls, data))
+
+
+@dataclass
+class UsageRecord:
+    """Tokens spent on one API call.
+
+    Added after the week-1 freeze. D-006 protects the three trace models
+    above; this is a fourth, additive record and changes none of them.
+
+    `purpose` is the field the cost metric turns on. docs/04 requires
+    recovery cost split into analysis and replay, and open issue #7 (the
+    check may cost more than the rerun) is decided by that split. Recording
+    it per call is the only way to get it -- it cannot be reconstructed from
+    a token total afterwards.
+
+    `event_id` is the event the call produced, or the event being analysed
+    for analysis-purpose calls. None only for calls outside the event stream.
+    """
+
+    call_id: str
+    purpose: UsagePurpose
+    model: str
+    prompt_tokens: int
+    output_tokens: int
+    total_tokens: int
+    event_id: str | None = None
+    agent_id: str | None = None
+    thoughts_tokens: int = 0
+    attempts: int = 1
+    latency_s: float = 0.0
+    slept_s: float = 0.0
+    timestamp: float = field(default_factory=time.time)
+
+    def __post_init__(self) -> None:
+        if self.purpose not in USAGE_PURPOSES:
+            raise ValueError(
+                f"UsageRecord.purpose {self.purpose!r} not one of "
+                f"{sorted(USAGE_PURPOSES)}"
+            )
+        for name in ("prompt_tokens", "output_tokens", "total_tokens"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"UsageRecord.{name} must not be negative")
+
+    @property
+    def is_analysis(self) -> bool:
+        """Analysis cost, as opposed to replay cost. The ratio between the two
+        is the break-even number open issue #7 asks for."""
+        return self.purpose in ("self_report", "counterfactual", "verification")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "call_id": self.call_id,
+            "purpose": self.purpose,
+            "model": self.model,
+            "prompt_tokens": self.prompt_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "event_id": self.event_id,
+            "agent_id": self.agent_id,
+            "thoughts_tokens": self.thoughts_tokens,
+            "attempts": self.attempts,
+            "latency_s": self.latency_s,
+            "slept_s": self.slept_s,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "UsageRecord":
         return cls(**_check_keys(cls, data))
 
 

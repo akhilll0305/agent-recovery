@@ -51,10 +51,24 @@ reporting agreement between them.
 ---
 
 ## D-004  LLM API and model
-Date: TODO
-Decided by: TODO
-Choice: TODO
-Reason: TODO — note budget, since counterfactual replay multiplies cost.
+Date: 26-08-2026
+Decided by: all three
+Choice: Gemini, `gemini-3.6-flash`, temperature 0. Model name is read from
+`GEMINI_MODEL` in `.env` and recorded in every trace header, so a run's
+numbers can always be tied to the model that produced them.
+Amended 26-08-2026, same day: the original choice was `gemini-2.5-flash`,
+which returns 404 for API keys created now -- the API's own error names
+`models/gemini-3.6-flash` as the replacement. Recorded rather than quietly
+edited because it is a finding in its own right: a one-month project can have
+its model retired underneath it mid-schedule. Any run traced before this
+amendment carries the old model name in its header and is not comparable with
+runs after it. Consequence for docs/04 run hygiene: if we have already
+collected numbers on a scenario, all methods on that scenario must be re-run
+on the new model, not just the ones we happen to re-run next.
+Reason: Flash tier keeps the budget survivable. Counterfactual replay
+multiplies call count -- one flagged source on one event is one extra call,
+and docs/04 asks for three repeats across ~30 runs per scenario -- so the
+per-call price is the constraint that matters, not the per-call quality.
 
 ---
 
@@ -178,3 +192,302 @@ Note: the same rule applies to tokens. Replay cost is charged to the event
 that is re-run; wrapping its output for a consumer costs nothing extra.
 
 ---
+
+## D-013  Gemini over stdlib HTTP, no SDK dependency
+Date: 26-08-2026
+Decided by: proposed with the pipeline, needs group sign-off
+Choice: `src/common/llm.py` posts to the `generateContent` REST endpoint with
+`urllib.request`. No `google-genai`, no `requests`, no `python-dotenv`.
+Rejected: the `google-genai` SDK; the deprecated `google-generativeai`
+package that happens to be installed on one of our machines.
+Reason: the ground rules say ask before adding a dependency, and this needs
+about sixty lines. It also keeps retry, timeout and token extraction in code
+we can read, which matters because rate-limit behaviour under counterfactual
+replay is something we have to measure and report, not just survive.
+Revisit if we need streaming, function calling, or multimodal input; the
+transport is one method (`GeminiClient._post`) and swapping it is contained.
+Note: `google-generativeai` is deprecated upstream. If we ever do adopt an
+SDK it must be `google-genai`.
+
+---
+
+## D-014  Web and database tools read fixtures, not the live internet
+Date: 26-08-2026
+Decided by: proposed with the pipeline, needs group sign-off
+Choice: the web tool ranks a canned corpus in `src/tracing/fixtures/`; the
+database tool reads a fixture dict. `src/eval/` injects poisoned pages by
+passing a modified corpus to `Tools`, without touching tool code.
+Rejected: a real search API.
+Reason: two of our claims depend on it. Ground truth is known by
+construction only if we author what the tools return (open issue #3), and
+counterfactual replay only means anything if re-running an event without one
+source reproduces everything else exactly -- a live search result that
+changes between the original call and the replay would silently look like
+influence. Reproducibility here is a requirement, not a convenience.
+Consequence: state plainly in the paper that tool outputs are a fixed corpus.
+A reviewer will otherwise assume live retrieval and ask about drift.
+
+---
+
+## D-015  Thinking minimised (thinkingLevel "minimal")
+Date: 26-08-2026
+Decided by: proposed with the pipeline, needs group sign-off
+Choice: every call sets `thinkingConfig.thinkingLevel = "minimal"`. The
+setting is recorded in the trace header, and `thoughts_tokens` is recorded
+per call whatever the setting says.
+Rejected: leaving the Flash model's default thinking on.
+Reason: thinking tokens are billed and would inflate the cost metric with
+work that is invisible in the trace, and variable-length internal reasoning
+is a second source of run-to-run variation on top of the one open issue #2
+already forces us to handle. `thoughts_tokens` is still recorded per call, so
+if we turn thinking back on for a scenario the cost stays separable.
+Amended 26-08-2026, same day: the mechanism changed, the decision did not.
+`thinkingBudget: 0` is what gemini-2.5-flash accepted; gemini-3.6-flash
+rejects it with 400 INVALID_ARGUMENT, which is what broke the first live run
+after the model change (D-004). Bisecting the request body one field at a
+time found `thinkingBudget` to be the only offending field -- JSON response
+mode is fine. This model takes `thinkingLevel` instead, one of minimal, low,
+high. "minimal" returned 0 thought tokens on both a trivial prompt and a
+realistic Researcher prompt, so the intent of this decision survives intact.
+Measured, for the paper: with thinking left at its default, "Reply with the
+word ok." cost 98 tokens of which 90 were thoughts. Roughly 92% of the spend
+on that call would have been invisible in the trace. That is the size of the
+distortion this decision avoids, and it is worth one line in the cost section.
+Consequence if a future model will not go to zero: the cost metric would
+carry tokens that appear nowhere in the event graph. It stays *separable*
+because `UsageRecord.thoughts_tokens` is recorded per call regardless, so the
+honest move then is to report thought tokens as their own column rather than
+fold them into the totals. Do not quietly leave them in.
+`python -m src.common.llm --smoke` now checks the request contract with one
+call, so the next model change costs one call to diagnose, not a whole run.
+
+---
+
+## D-016  One API call per Researcher finding
+Date: 26-08-2026
+Decided by: proposed with the pipeline, needs group sign-off
+Choice: the Researcher answers each planned question in its own call,
+producing one `agent_output` event per finding.
+Rejected: one call returning all findings as a list.
+Reason: work preserved is counted per event (D-012), so replay cost has to be
+countable per event too. If one call produced four findings, "the cost of
+recomputing one finding" would be undefined, and that number is half of open
+issue #7. It also makes selective replay real rather than notional: replaying
+one contaminated finding is one call, not a re-run of all four.
+Cost: more prompt tokens overall, since the sources are re-sent per question.
+That overhead is real and belongs in the cost table rather than being hidden.
+
+---
+
+## D-017  Free-tier quota is 20 requests per day, and the plan does not fit in it
+Date: 26-08-2026
+Decided by: NOT DECIDED -- needs all three, this week
+Choice: open. The measurement is not open, and it is the reason this needs a
+decision now rather than in week 3.
+
+Measured against the live API on 26-08-2026:
+
+```
+quotaId    GenerateRequestsPerDayPerProjectPerModel-FreeTier
+quotaValue 20
+model      gemini-3.6-flash
+```
+
+Per **day**, per model, per project -- not per minute. Rejected requests
+appear to count against it, so a burst of 429s makes it worse rather than
+better.
+
+The arithmetic against docs/04:
+
+```
+one pipeline run                       6 requests  (planner 1, researcher 3, coder 2)
+  -> 3 runs per day, absolute ceiling
+30 runs x 3 scenarios                540 requests  original runs only
+B0 full restart baseline             540 requests  it re-runs everything
+counterfactual replay                 1 request per flagged source per event,
+                                      x3 repeats for non-determinism (docs/04)
+```
+
+Even before counterfactual checks -- the thing the paper is actually about --
+that is well over 1000 requests, or 50+ days of free-tier quota. We have one
+month, and week 2 is where the call count starts multiplying.
+
+Options, for the group to choose between:
+1. Enable billing on the API project. Costs money; makes the plan as written
+   feasible. Flash tier pricing is low, and D-015 already removed thinking
+   tokens, which were 92% of spend on a trivial call.
+2. Cut the experiment: fewer runs per scenario, fewer scenarios, or
+   counterfactual checks on a sampled subset with the sampling reported.
+   Cheaper, and honest if we say so, but it weakens the headline numbers and
+   open issue #3 already wants ~30 labelled runs per scenario.
+3. Spread runs across several API projects or keys. Works, but it is quota
+   evasion, it makes runs non-comparable across keys, and it is not something
+   to put in a paper.
+
+Recommendation: option 1, with option 2's sampling as the fallback if the
+budget is refused. Whatever is chosen, write the token and request counts into
+the paper -- open issue #7 asks for cost numbers, and "the method needed N
+requests" is exactly the kind of number a reviewer wants.
+
+Consequence for the code, already applied: the client now separates the
+per-minute limit (retryable, honours the server's suggested delay) from the
+per-day limit (fatal, `QuotaExhausted`). Backing off against a daily cap wasted
+152 seconds and several requests before this.
+
+---
+
+## D-018  Checkpoint payloads live in a sidecar file, not in the trace
+Date: 26-08-2026
+Decided by: proposed with the trace layer, needs group sign-off
+Choice: two files per run.
+
+```
+data/runs/run1.jsonl              events, sources, influence, usage
+data/runs/run1.checkpoints.jsonl  agent state and memory snapshots
+```
+
+Rejected: checkpoints as another record type inside the trace; one directory
+of numbered checkpoint files.
+Reason: it is the storage policy from docs/02-architecture.md made literal.
+Metadata is always kept and is small; full agent state is "the expensive
+part" and is kept only at checkpoints. Keeping them in one file would mean
+every tool that reads a trace pays to parse state it does not want, and the
+overhead measurement open issue #8 asks for would need the two separated
+anyway. `overhead()` reports the split directly.
+Measured on an 18-event run: trace 11.1 kB, checkpoints 4.0 kB, so
+checkpoints are 26% of stored bytes at the v1 policy of one per agent
+boundary. That is the number to re-measure on real runs and report.
+Consequence: D-008's "one file per run" now reads "one trace file per run".
+A run is self-contained in a directory, not in a file. Both graphs still
+rebuild from the trace file alone, which is what the week-1 exit test asks.
+
+---
+
+## D-019  Record/replay cassettes for development, never for results
+Date: 26-08-2026
+Decided by: proposed with the pipeline, needs group sign-off
+Choice: `src/common/cassette.py` records live responses to a JSONL cassette
+and replays them offline. Cassettes are committed. A replayed run writes
+`"cassette": "replay"` into its trace header.
+Rejected: everyone spending their own quota to see a real trace; mocking
+responses by hand.
+Reason: 20 requests a day across three people (D-017) does not allow each of
+us a real trace to develop against. One recorded run replays indefinitely for
+free, and it is real model output rather than something we invented, so
+provenance and recovery are built against text the model actually produced.
+
+**The rule, and it is not negotiable:** no number from a replayed run goes in
+the paper as a measurement. Token counts replay faithfully because they are
+the counts the model returned, but the request did not happen, and
+`latency_s` and `attempts` are recorded values that describe the original
+call. Every table in docs/04 comes from runs with no `cassette` key in the
+header. The header marking exists so that this is checkable rather than
+remembered.
+Note: replay needs no API key at all, so a teammate can clone the repo and
+work immediately. A cassette miss raises rather than falling through to a
+live call -- silently spending the day's quota on a changed prompt is exactly
+the failure this is meant to prevent.
+
+---
+
+## D-020  Socket-level errors are retryable; timeout raised to 120s
+Date: 31-08-2026
+Decided by: proposed with the first successful live run, needs group sign-off
+Choice: `GeminiClient._post` catches `OSError` after `urllib.error.URLError`
+and converts it to `Retryable`. `Settings.timeout_s` goes 60 -> 120.
+Rejected: leaving the timeout at 60 and relying on retries.
+
+Reason: the first live run of the full pipeline died four calls in, on the
+third Researcher finding, with a bare `TimeoutError` and a stack trace. A read
+timeout that happens *after* the connection is established is an `OSError` but
+**not** a `URLError`, so the `except urllib.error.URLError` clause never saw
+it. Two things followed from that one gap, and both are worse than the timeout
+itself:
+
+  * it bypassed the retry loop entirely -- `max_attempts=5` was configured and
+    never used, because `with_retry` only retries `Retryable`
+  * it bypassed the `except (LLMError, RuntimeError)` handler in
+    `pipeline.__main__` too, so the run printed a traceback instead of the
+    partial-trace report that D-008's append-only format exists to make
+    possible. `OSError` is now in that tuple as well.
+
+The timeout goes up rather than the retry count because of D-017: under a
+20-requests-per-day quota, **waiting is free and retrying costs a request**.
+120s is far past any plausible generation time for this model at
+`max_output_tokens=2048` -- the call that stalled had produced ~700 output
+tokens in ~4s on the two calls either side of it, so this was a network stall,
+not slow generation.
+
+Cost of the lesson, for the record: the aborted attempt spent 5 requests (4
+answered, 1 timed out) of that day's 20.
+
+Consequence for the cost metric, and it is a real one: **a timed-out request
+costs quota but contributes no tokens to the trace.** The server generated an
+answer we never received. So "requests spent" and "calls recorded in the
+trace" are not the same number, and open issue #7 wants the first.
+`UsageRecord.attempts` captures retries within a call that eventually
+succeeded; a call that fails outright records nothing at all. When we report
+request counts in the paper, count attempts, and say that failed attempts are
+included.
+Note while fixing: `load_settings()` restates every default a second time
+alongside the `Settings` field defaults, so changing the dataclass default
+alone does nothing. Both were updated and a comment now says so. Worth
+collapsing if it bites anyone again.
+
+---
+
+## D-021  A `--record` run is a live run; only `"cassette": "replay"` disqualifies
+Date: 31-08-2026
+Decided by: proposed with the first successful live run, needs group sign-off
+Choice: refine D-019's header rule. Paper numbers may come from a trace whose
+header says `"cassette": "record"`. They may never come from one that says
+`"cassette": "replay"`.
+Rejected: D-019's literal wording, "every table comes from runs with no
+`cassette` key in the header".
+
+Reason: D-019 was written before a recording run had ever succeeded, and its
+rule reads on the presence of the key rather than on its value. Taken
+literally it disqualifies the very run that produces the cassette -- a run in
+which every request was genuinely made, every token genuinely spent, and every
+latency genuinely measured. Recording is a side effect of that run, not a
+substitute for it. Enforcing the rule as written would have meant spending
+another 6 requests to re-run the identical pipeline with recording off, which
+buys nothing and costs a third of a day's quota.
+
+The thing D-019 is actually protecting against is a number that describes a
+request that never happened. That is exactly and only the `replay` case. The
+distinction is checkable in the header either way, which was D-019's real
+point.
+Unchanged: `latency_s` and `attempts` from a replayed run mean nothing, a
+cassette miss still raises rather than falling through to a live call, and no
+replayed number goes in a table.
+
+---
+
+## D-022  Checkpoint overhead re-measured on a real run: 56%, not 26%
+Date: 31-08-2026
+Decided by: measurement, no choice to make
+Choice: none. D-018 asked for this number to be re-measured on real runs
+rather than on the fake pipeline, so here it is.
+
+Measured on `data/runs/run1.jsonl`, the first complete live run, 18 events,
+4640 tokens, v1 checkpoint policy of one per agent boundary:
+
+```
+trace         12,493 B
+checkpoints   16,080 B   across 4 checkpoints
+checkpoint share   56% of stored bytes
+```
+
+D-018 measured 26% on a run of the same event count. The gap is entirely real
+model output: a checkpoint carries `outputs`, the accumulated text of every
+event so far, and the fake pipeline's stub text is a fraction of the length of
+what the model actually writes. Checkpoints therefore grow with the *square*
+of run length under the v1 policy -- each one re-serialises every output
+before it -- while the trace grows linearly.
+
+Consequence: 56% is the number to quote for open issue #8, not 26%, and the
+v1 policy is the thing to name as the cause. Do not fix it yet; the quadratic
+growth is only worth engineering away if run length grows past this testbed's
+18 events, and "we measured the naive policy and it cost 56%" is a more useful
+sentence in the paper than a policy tuned before anyone needed it.
