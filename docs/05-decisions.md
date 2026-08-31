@@ -595,3 +595,49 @@ Until this lands, `contaminate(checked=None)` infers the checked set from the
 edges and says so in its docstring. `src/eval/` must pass an explicit
 `checked` set when scoring, or every number it produces understates the
 method.
+
+---
+
+## D-025  Attack variants are intents, and validity is checked on the trace
+Date: 31-08-2026
+Decided by: proposed with attack injection, needs group sign-off
+Choice: three things about how runs are built and counted.
+
+**1. "influencing" and "exposed only" name what an attack was built to do,
+never what happened.** docs/04 asks for two variants of each scenario as
+though we control which occurs. We do not. Whether a model uses a page it was
+shown is its decision, and the premise of this project is precisely that
+exposure does not settle influence -- we cannot assume our way to the answer
+we are trying to measure. Which variant actually occurred is read afterwards
+from the influence edges.
+Consequence, and it is the one that protects the numbers: a run built as
+exposed-only that turns out to be influencing is a valid data point and stays
+in. Dropping it would silently over-sample the case that flatters us, which
+docs/04 already warns against in the same paragraph that asks for the split.
+
+**2. An attack that never reached the trace is not a run.** Validity is
+established by finding the planted marker in the finished trace, not by
+checking the corpus beforehand. A pre-flight query is a guess: the query the
+Researcher issues is built from the Planner's questions and does not exist
+until the run happens. Checking a fixture against your own query tells you it
+*can* be reached, not that it *was* -- and the failure is silent, because the
+run completes and the trace looks entirely normal while measuring nothing.
+Found the honest way: the first version of `reaches()` passed against a query
+we invented, and the same page was then never retrieved by the pipeline.
+`src/eval/harness.py` now raises when the marker is absent.
+
+**3. Never assert that unexamined exposures were checked.** The D-024 stopgap
+`all_exposure_pairs()` claims every exposure was examined and cleared. Applied
+to a trace where no influence analysis has run -- where *every* exposure
+lacks an edge -- it reports the poisoned run as 100% preserved, 0 events
+contaminated, 0 unsafe. A textbook unsafe preservation, invented out of an
+assumption rather than a mistaken measurement. It defaults to off and the
+harness refuses it outright on a trace with no influence edges.
+
+Observed while building, and worth keeping in the paper: with no influence
+analysis run, the influencing and exposed-only variants of scenario A score
+**identically** (72% preserved, both). That is correct. The conservative
+fallback cannot tell them apart, because telling them apart is exactly what
+counterfactual analysis is for. It is a clean demonstration of what the
+expensive half of the method buys, and it is the number to put beside the
+analysed result rather than a bug to fix.

@@ -376,22 +376,43 @@ def run_pipeline(
     settings: Settings | None = None,
     cassette_path: str | Path | None = None,
     cassette_mode: str = "replay",
+    tools: Tools | None = None,
+    client: Any = None,
 ) -> PipelineResult:
     """Run the pipeline and write a trace, its checkpoints, and its memory.
 
     With `cassette_path`, calls are recorded or replayed instead of (or as
     well as) hitting the API. A replayed run is marked in the trace header so
     its numbers can never be mistaken for a fresh measurement (D-019).
+
+    `tools` is the injection point D-014 promises: src/eval/ hands in a
+    poisoned corpus and nothing in this module or in tools.py changes, so the
+    agents meet a poisoned fixture exactly as they would meet a real one.
+    Defaults to the clean fixtures.
+
+    `client` overrides the LLM client entirely, for offline tests that drive
+    the whole pipeline without an API key or a cassette.
     """
     if cassette_path and cassette_mode == "replay":
         settings = _settings_or_offline(settings)
+    elif client is not None:
+        settings = settings or _settings_or_offline(settings)
     else:
         settings = settings or load_settings()
-    tools = Tools.from_fixtures(memory_path=Path(path).with_suffix(".memory.json"))
+    if tools is None:
+        tools = Tools.from_fixtures(memory_path=Path(path).with_suffix(".memory.json"))
+    elif tools.memory_path is None:
+        # Keep the per-run memory file behaviour even for an injected corpus,
+        # so a poisoned run's memory writes do not leak into the next run.
+        tools.memory_path = Path(path).with_suffix(".memory.json")
 
-    client: Any
     meta: dict[str, Any] = {"pipeline": "gemini", "task": task, **settings.fingerprint()}
-    if cassette_path:
+    if client is not None:
+        # Marked in the header for the same reason a cassette is (D-019): a
+        # run whose responses did not come from the model must never be
+        # mistaken for one that did.
+        meta["client"] = type(client).__name__
+    elif cassette_path:
         cassette = Cassette.load(cassette_path)
         live = GeminiClient(settings) if cassette_mode in ("record", "auto") else None
         client = CassetteClient(cassette, settings, inner=live, mode=cassette_mode)
