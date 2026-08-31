@@ -641,3 +641,58 @@ fallback cannot tell them apart, because telling them apart is exactly what
 counterfactual analysis is for. It is a clean demonstration of what the
 expensive half of the method buys, and it is the number to put beside the
 analysed result rather than a bug to fix.
+
+---
+
+## D-026  Counterfactual comparison is semantic. Text comparison is unusable.
+Date: 31-08-2026
+Decided by: forced by measurement, needs group sign-off on the comparator
+Choice: a counterfactual check compares the **decision** an output encodes,
+never the text of the output. Text-level comparison is removed from the
+method, not kept as a cheap first pass.
+Rejected: string equality; normalised string equality; "repeat 3 times and
+see if the wording changed" (issue #2's original answer).
+
+Reason: measured, on the live model, 31-08-2026. Eight re-sends of one
+identical recorded request at temperature 0 (open issue #10):
+
+```
+exact / whitespace / alphanumeric   floor 100%   8 of 8 answers distinct
+decision (which library)            floor   0%   1 distinct across 9 samples
+```
+
+At a 100% floor a counterfactual flip carries **zero** information: remove a
+source, re-run, the text differs -- and it would have differed anyway. Every
+influence edge established that way would have been noise wearing the shape
+of evidence, and the exposure-vs-influence gap, which is the whole paper,
+would have been measured with an instrument whose needle moves on its own.
+
+The same eight samples put the decision-level floor at 0%. All nine answers
+(recorded plus eight) chose standard-library `datetime` with candidate format
+strings. The choice is stable; only the prose around it moves.
+
+docs/03 issue #2 already said comparison should be "semantic / behavioural".
+This upgrades that from a preference to a requirement, and attaches numbers
+to both ends of it.
+
+Consequences, none of them optional:
+
+- Every event kind needs a defined comparator before counterfactual replay
+  can produce a single edge. `decision` -> which library/approach was chosen.
+  `agent_output` for code -> what the executed script prints, which the
+  Executor already computes. `agent_output` for prose findings -> the open
+  one, and the hardest; an LLM judge is the obvious candidate and it is
+  itself an instrument with a noise floor that would then need measuring.
+- Report the floor beside every influence result, under the comparator that
+  produced it. A flip means nothing without the churn it is read against.
+- The comparator must be fixed **before** looking at the trials. The one used
+  here is a hardcoded list of library names written in advance and not
+  adjusted afterwards; tuning a comparator until it reports stability would
+  manufacture exactly the result we are trying to test.
+- Temperature 0 is not determinism on a hosted model. Anything in docs/04
+  that assumes replay reproduces text is wrong and needs rewriting.
+
+Caveat, stated because it limits the claim: 8 trials, not 20 -- the daily
+quota ran out. A 0% decision-level floor on 8 trials is still consistent with
+a true rate near 30%. The 100% text-level floor needs no such caveat; it is
+8 out of 8 and it is not going to improve with more samples.
