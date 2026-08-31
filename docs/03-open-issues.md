@@ -178,6 +178,26 @@ Two things this buys, and both are worth a day:
 Do it once per model. The floor belongs to a model, so it is void the day the
 model changes (D-004 has already happened once).
 
-**Status:** not started. Blocks nothing this week — week 2 is offline graph
-work — but it must land before any influence number is quoted. Cheapest
-high-value measurement available to us.
+**Status:** PARTIALLY MEASURED, 31-08-2026, 8 of 20 trials. The result
+changed the method — see D-026. Top up to 20 on the next day's quota.
+
+Measured on `gemini-3.6-flash`, temperature 0, the Coder's `decision` call
+from `data/runs/run1.jsonl`, 8 live re-sends of the identical request:
+
+```
+comparison       distinct  differs   floor
+exact                   8        8    100%
+whitespace              8        8    100%
+alphanumeric            8        8    100%
+decision                1        0      0%
+```
+
+Every one of the eight answers was textually unique. Every one of them made
+the same decision: standard-library `datetime`, candidate format strings,
+`strptime`. The wording is pure churn; the choice underneath it did not move
+once in nine samples.
+
+So the floor is not one number, it is a property of the comparison, and the
+gap between the two ends is total. Temperature 0 does **not** give
+determinism on this hosted model, which is the assumption issue #2's
+"repeat 3 times" was resting on.
