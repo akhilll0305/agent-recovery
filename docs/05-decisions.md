@@ -540,3 +540,58 @@ cutting the experiment weakens the paper while this does not.
 Note: this also removes the pressure that produced open issue #10's cost
 objection. A noise floor of 20 replays is a full day of hosted quota and
 about a minute locally, so the measurement stops being something we ration.
+
+---
+
+## D-024  The trace cannot tell "checked and clean" from "never checked"
+Date: 31-08-2026
+Decided by: proposed with the contamination walk, needs group sign-off --
+this touches the shared trace format (D-006, D-008)
+Choice: add one additive record type, `check`, recording that a
+(source, event) pair was examined:
+
+```
+{"record": "check", "source_id": "S5", "target_event": "e0007",
+ "method": "counterfactual"}
+```
+
+Rejected: inferring it from the influence edges, which is what the code does
+today and what this entry exists to replace.
+
+Reason: a counterfactual check that finds **no** influence records nothing.
+So an absent influence edge means one of two opposite things -- "we tested
+this pair and it came back clean" or "nobody ever looked" -- and the
+conservative fallback (docs/02: anything not confidently established is
+treated as contaminated) has to assume the second. Every cleared pair is
+therefore re-contaminated by the very policy that is supposed to protect us.
+
+Measured on `data/runs/fake.jsonl`, seeding S5:
+
+```
+inferred from edges   6 of 17 events contaminated, 11 preserved (65%)
+with checks recorded  3 of 17 events contaminated, 14 preserved (82%)
+wrongly discarded     e0007, e0008, e0009
+```
+
+Seventeen points of the headline metric, thrown away by a missing record.
+Those three events were each tested against S5 and cleared -- that is exactly
+why they carry no edge -- and we discard them anyway.
+
+The error is in the safe direction: it over-contaminates, so it costs work
+preserved and can never cause an unsafe preservation. That is why it is a
+defect rather than a disaster, and why it was survivable long enough to go
+unnoticed. It would have shown up in the paper as our method looking worse
+than it is, which is the kind of bug nobody goes looking for.
+
+Why a separate record rather than a field on `InfluenceEdge`: an edge is a
+positive claim, and there is no edge to hang a negative on. Recording the
+*examination* keeps one source of truth -- examined plus an edge means
+influenced, examined without an edge means cleared, no examination at all
+means unknown and the policy decides. `UsageRecord` is the precedent for
+adding a record type after the week-1 freeze without touching the three
+models D-006 protects.
+
+Until this lands, `contaminate(checked=None)` infers the checked set from the
+edges and says so in its docstring. `src/eval/` must pass an explicit
+`checked` set when scoring, or every number it produces understates the
+method.
