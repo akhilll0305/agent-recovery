@@ -491,3 +491,52 @@ v1 policy is the thing to name as the cause. Do not fix it yet; the quadratic
 growth is only worth engineering away if run length grows past this testbed's
 18 events, and "we measured the naive policy and it cost 56%" is a more useful
 sentence in the paper than a policy tuned before anyone needed it.
+
+---
+
+## D-023  A fourth option for D-017: run the bulk locally
+Date: 31-08-2026
+Decided by: NOT DECIDED -- this adds an option to D-017, it does not close it
+Choice: open. D-017 offers three ways out of the quota problem (enable
+billing, cut the experiment, juggle keys). There is a fourth that is not in
+that list and should be, because it is cheaper than option 1 and more honest
+than options 2 and 3.
+
+**Run the bulk of the experiment on a local model, and keep the hosted model
+for a spot-check subset.**
+
+A local model served on the machine has no request quota at all. The 1000+
+requests D-017 computes stop being a budget problem and become a wall-clock
+problem, which we can absorb -- week 4 is evaluation and the runs are
+scriptable.
+
+Why this is consistent with what we already decided rather than a reversal:
+D-004 chose the Flash tier explicitly because "the per-call price is the
+constraint that matters, not the per-call quality". That reasoning points at
+a local model more strongly than it points at Flash. We are not measuring how
+good an agent is. We are measuring whether influence can be separated from
+exposure, and that claim is about the method, not about the model's ability.
+
+Costs, stated plainly because this is the part that needs group agreement:
+
+- A reviewer will ask whether the result holds on a frontier model. The
+  answer has to be a measured subset, not an assertion -- run one scenario on
+  the hosted model and report both, rather than claiming it generalises.
+- A small model may be incoherent enough that its choices are noise rather
+  than judgement, which would make ground truth meaningless. This has to be
+  gated before committing: check that the local model can actually complete
+  the Coder role -- produce a script the Executor runs to the correct output
+  -- and that its decisions look like decisions.
+- Numbers from two models are not comparable. D-004's rule already covers it:
+  all methods on a scenario run on the same model, or none of them do. The
+  model name is already in every trace header, so this stays checkable.
+- No new dependency. A local server is spoken to over HTTP the same way the
+  Gemini client already is, with stdlib `urllib` (D-013).
+
+Recommendation: put this in front of the group alongside D-017's other three.
+It does not need to win -- if billing is approved, take billing, it is
+simpler. It matters because D-017 is currently framed as pay-or-cut, and
+cutting the experiment weakens the paper while this does not.
+Note: this also removes the pressure that produced open issue #10's cost
+objection. A noise floor of 20 replays is a full day of hosted quota and
+about a minute locally, so the measurement stops being something we ration.

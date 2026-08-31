@@ -136,3 +136,48 @@ estimate it with counterfactual replay. Lead with that framing, not with
 **#1** (can we actually establish non-influence) and **#7** (is it cheaper
 than just re-running). If those two have solid numbers, the rest are
 manageable.
+
+---
+
+## 10. We have never measured the noise floor
+
+Counterfactual replay reads a changed output as evidence of influence:
+remove the source, re-run, the answer is different, therefore the source
+mattered.
+
+That inference is only valid if the model would have given the *same* answer
+had we changed nothing. Nobody has checked whether it does. Issue #2 says
+replay is non-deterministic and answers "repeat each comparison 3 times", but
+3 is a guess. It was never calibrated against a measurement, because the
+measurement has never been taken.
+
+Call the thing we are missing the **noise floor**: how often the same request,
+sent again completely unchanged, produces a different answer. Every
+counterfactual result has to be read against it. If the floor is 5%, a flip is
+strong evidence. If it is 40%, a flip is a coin toss and three repeats cannot
+tell the difference.
+
+**Our answer:** measure it before collecting any runs.
+
+Take one decision from `data/runs/run1.jsonl`. Re-send that exact recorded
+request 20 times with nothing removed, at temperature 0, and count how often
+the output differs. That number is the floor for this model. Report it beside
+every influence result in the paper.
+
+Cost: 20 requests, one day of free-tier quota (D-017).
+
+Two things this buys, and both are worth a day:
+
+- If the floor is near zero, the whole counterfactual method is on solid
+  ground and that becomes one confident sentence in the paper rather than a
+  hope.
+- If it is high, we learn it *before* spending 540 runs on top of it, and we
+  either raise the repeat count, compare outputs semantically instead of
+  exactly, or narrow what we claim.
+
+Do it once per model. The floor belongs to a model, so it is void the day the
+model changes (D-004 has already happened once).
+
+**Status:** not started. Blocks nothing this week — week 2 is offline graph
+work — but it must land before any influence number is quoted. Cheapest
+high-value measurement available to us.
